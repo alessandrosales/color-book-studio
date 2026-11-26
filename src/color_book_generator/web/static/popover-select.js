@@ -1,6 +1,8 @@
+import { animatePopoverOpen } from "/static/motion.js";
+
 /**
  * Popover Select — progressively enhances native <select> elements into
- * Pwrite-styled floating popover dropdowns with keyboard nav & GSAP motion.
+ * floating popover dropdowns with keyboard navigation and GSAP motion.
  */
 
 const instances = new WeakMap();
@@ -129,16 +131,7 @@ export function enhanceSelect(select) {
     trigger.setAttribute("aria-expanded", "true");
     activePopover = { wrap, menu, trigger };
 
-    if (typeof window.gsap !== "undefined") {
-      const mm = window.gsap.matchMedia();
-      mm.add("(prefers-reduced-motion: no-preference)", () => {
-        window.gsap.fromTo(
-          menu,
-          { y: menu.classList.contains("is-up") ? 6 : -6, autoAlpha: 0, scale: 0.98 },
-          { y: 0, autoAlpha: 1, scale: 1, duration: 0.16, ease: "power2.out", clearProps: "transform,opacity,visibility" }
-        );
-      });
-    }
+    animatePopoverOpen(menu, menu.classList.contains("is-up"));
   });
 
   const record = { wrap, trigger, menu };

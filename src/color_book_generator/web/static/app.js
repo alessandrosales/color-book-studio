@@ -1,8 +1,14 @@
 import { syncAllPopoverSelects } from "/static/popover-select.js";
-import { renderStylePicker } from "/static/style-picker.js";
+import { formatPageSize, renderStylePicker } from "/static/style-picker.js";
+import { animateLightboxOpen, animateModalOpen, animateStageEnter } from "/static/motion.js";
+import { fetchFontPresetFile, renderFontPresetPicker } from "/static/font-presets.js";
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+function plural(n, one, many) {
+  return `${n} ${n === 1 ? one : many}`;
+}
 
 const STATUS_LABEL = {
   pending: "pendente",
@@ -31,6 +37,9 @@ const state = {
   codexTimer: null,
   currentStep: 1,
   busyPages: new Set(),
+  insertingAfter: null,
+  lastInsertedIndex: null,
+  selectedFontPresetId: null,
   lightboxItems: [],
   lightboxIndex: -1,
   autopilotTimer: null,
@@ -79,33 +88,27 @@ function sessionIdFromUrl() {
 
 /* ==================== STEPPER & GSAP TRANSITIONS ==================== */
 function setStep(step, { animate = true, persist = true } = {}) {
-  const next = Math.max(1, Math.min(5, Number(step) || 1));
+  const raw = Number(step) || 1;
+  const next = Math.max(1, Math.min(4, raw >= 5 ? 4 : raw));
   state.currentStep = next;
 
   $$(".step-tab").forEach((tab) => {
-    tab.classList.toggle("is-active", Number(tab.dataset.step) === next);
+    const isActive = Number(tab.dataset.step) === next;
+    tab.classList.toggle("is-active", isActive);
+    if (isActive) {
+      tab.setAttribute("aria-current", "step");
+    } else {
+      tab.removeAttribute("aria-current");
+    }
   });
 
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= 4; i++) {
     const panel = $(`#stage-${i}`);
+    if (!panel) continue;
     const isTarget = i === next;
     panel.classList.toggle("is-hidden", !isTarget);
-    if (isTarget && animate && typeof window.gsap !== "undefined") {
-      const mm = window.gsap.matchMedia();
-      mm.add("(prefers-reduced-motion: no-preference)", () => {
-        window.gsap.fromTo(
-          panel,
-          { y: 14, autoAlpha: 0 },
-          {
-            y: 0,
-            autoAlpha: 1,
-            duration: 0.42,
-            ease: "power3.out",
-            overwrite: "auto",
-            clearProps: "transform,opacity,visibility",
-          }
-        );
-      });
+    if (isTarget && animate) {
+      animateStageEnter(panel);
     }
   }
 
@@ -123,19 +126,18 @@ function renderHeaderAndStepper() {
   if (!s) return;
 
   $("#session-title").value = s.title;
-  document.title = `${s.title} — Color Book Studio`;
-  $("#meta-format").textContent = `${s.trim_in[0]}x${s.trim_in[1]} in · ${s.dpi} DPI`;
+  document.title = `${s.title} | Color Book Studio`;
+  $("#meta-format").textContent = `${s.trim_in[0]} x ${s.trim_in[1]} in, ${s.dpi} DPI`;
   if ($("#export-book-zip")) $("#export-book-zip").href = `/api/sessions/${s.id}/export`;
 
   const doneCount = s.pages.filter((p) => p.status === "done").length;
   const totalCount = s.pages.length;
 
   const activePreset = state.presets.find((p) => p.id === s.preset_id);
-  $("#step-1-sub").textContent = activePreset ? activePreset.name : s.page_size.replace("_", " ");
-  $("#step-2-sub").textContent = `${s.characters.length} ${s.characters.length === 1 ? "personagem" : "personagens"}`;
-  $("#step-3-sub").textContent = s.story_synopsis ? "Roteiro pronto" : `${totalCount} páginas`;
-  $("#step-4-sub").textContent = `${doneCount} / ${totalCount} prontas`;
-  $("#step-5-sub").textContent = s.cover_status === "done" ? "Capa pronta" : "Capa e PDF";
+  $("#step-1-sub").textContent = activePreset ? activePreset.name : formatPageSize(s.page_size);
+  $("#step-2-sub").textContent = plural(s.characters.length, "personagem", "personagens");
+  $("#step-3-sub").textContent = `${doneCount} / ${totalCount} prontas`;
+  $("#step-4-sub").textContent = s.cover_status === "done" ? "Capa pronta" : "Capa e PDF";
   $("#progress-pill").textContent = `${doneCount} / ${totalCount} prontas`;
 
   const canCompose = doneCount > 0;
@@ -218,6 +220,56 @@ function renderStage1Form() {
 
   renderCaptionSettings(s);
   $("#style-detect-btn").classList.toggle("is-hidden", !s.style_url);
+  renderStudioFontPresets();
+  renderAutopilotSummary();
+}
+
+function renderStudioFontPresets() {
+  renderFontPresetPicker({
+    root: $("#studio-font-presets"),
+    selectedId: state.selectedFontPresetId,
+    onSelect: async (fontPreset) => {
+      try {
+        const file = await fetchFontPresetFile(fontPreset);
+        const form = new FormData();
+        form.append("image", file);
+        await api(`/api/sessions/${state.sid}/style`, { method: "POST", body: form });
+        const cap = fontPreset.caption;
+        state.session = await api(`/api/sessions/${state.sid}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            caption_enabled: Boolean(cap.enabled),
+            caption_style: cap.style,
+            caption_position: cap.position,
+            caption_font_family: cap.font_family,
+            caption_font_bold: Boolean(cap.bold),
+            caption_font_size: cap.font_size_ratio,
+          }),
+        });
+        state.selectedFontPresetId = fontPreset.id;
+        await reloadSession();
+        toast(`Referência de fonte "${fontPreset.name}" aplicada.`);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    },
+  });
+}
+
+function renderAutopilotSummary() {
+  const el = $("#autopilot-config-summary");
+  const s = state.session;
+  if (!el || !s) return;
+  const pageCount = s.pages?.length || 12;
+  const fmtOpt = $("#page-size")?.selectedOptions?.[0]?.textContent || s.page_size;
+  const prov = $("#provider")?.value || s.provider;
+  const model = $("#model")?.value || s.model;
+  const capOn = $("#caption-enabled")?.checked;
+  const fontLabels = { sans: "Sans", serif: "Serif", mono: "Mono" };
+  const font = fontLabels[$("#caption-font")?.value || s.caption_font_family] || "Sans";
+  const weight = ($("#caption-weight")?.value || (s.caption_font_bold ? "bold" : "normal")) === "bold" ? "Negrito" : "Normal";
+  const capText = capOn ? `legenda ativa (${font}, ${weight})` : "sem legenda";
+  el.textContent = `Configuração atual: ${plural(pageCount, "página", "páginas")}, ${fmtOpt}, ${prov} (${model}), ${capText}.`;
 }
 
 function renderCaptionSettings(s) {
@@ -231,7 +283,7 @@ function renderCaptionSettings(s) {
 
   const fontLabels = { sans: "Sans", serif: "Serif", mono: "Mono" };
   $("#style-typography-status").textContent =
-    `Fonte aplicada: ${fontLabels[s.caption_font_family] || "Sans"} · ` +
+    `Fonte ativa: ${fontLabels[s.caption_font_family] || "Sans"}, ` +
     (s.caption_font_bold ? "Negrito" : "Normal");
 }
 
@@ -326,7 +378,7 @@ function renderStage2Characters() {
         </label>
         <div class="char-card-actions">
           <button class="btn btn-accent btn-sm char-gen-btn" type="button">
-            ${char.image_url ? "Regenerar Sheet" : "Gerar Character Sheet"}
+            ${char.image_url ? "Refazer folha" : "Gerar folha de referência"}
           </button>
           <button class="btn btn-danger-ghost btn-sm char-del-btn" type="button">Remover</button>
         </div>
@@ -336,16 +388,16 @@ function renderStage2Characters() {
     if (char.image_url) {
       const img = document.createElement("img");
       img.src = char.image_url;
-      img.alt = "";
+      img.alt = `Folha de referência de ${char.name}`;
       img.addEventListener("click", () => {
-        openLightbox([{ url: char.image_url, caption: `Character Sheet — ${char.name}` }], 0);
+        openLightbox([{ url: char.image_url, caption: `Folha de referência: ${char.name}` }], 0);
       });
       thumb.appendChild(img);
     } else {
       const emptyHint = document.createElement("span");
-      emptyHint.className = "hint";
-      emptyHint.style.cssText = "font-size: 0.82rem; padding: 12px; text-align: center;";
-      emptyHint.textContent = "Character Sheet ainda não gerado";
+      emptyHint.className = "hint hint-xs";
+      emptyHint.style.cssText = "padding: 12px; text-align: center;";
+      emptyHint.textContent = "Folha de referência ainda não gerada.";
       thumb.appendChild(emptyHint);
     }
     card.querySelector(".char-card-name").textContent = char.name;
@@ -368,14 +420,14 @@ function renderStage2Characters() {
     card.querySelector(".char-gen-btn").addEventListener("click", async (ev) => {
       const btn = ev.currentTarget;
       btn.disabled = true;
-      btn.textContent = "Gerando Sheet…";
+      btn.textContent = "Gerando folha…";
       try {
         await api(`/api/sessions/${state.sid}/characters/${char.id}/generate-sheet`, {
           method: "POST",
           body: JSON.stringify({}),
         });
         await reloadSession();
-        toast(`Character Sheet de ${char.name} atualizado!`);
+        toast(`Folha de referência de ${char.name} atualizada.`);
       } catch (err) {
         toast(err.message, true);
       } finally {
@@ -414,7 +466,7 @@ function renderStage2Characters() {
   }
 }
 
-function renderStage3Story() {
+function renderStage3StoryAndPages() {
   const s = state.session;
   if (!s) return;
 
@@ -425,64 +477,191 @@ function renderStage3Story() {
   $("#story-pages").value = s.pages.length || 12;
   if ($("#story-language")) $("#story-language").value = s.language || "en";
 
-  const list = $("#script-list");
+  const list = $("#page-list");
+  if (!list) return;
   list.innerHTML = "";
   const allChars = allSelectableCharacters();
+  const donePages = s.pages.filter((p) => p.status === "done" && p.view_url);
+  const insertingAny = state.insertingAfter !== null;
 
   for (const page of s.pages) {
     const li = document.createElement("li");
-    li.className = "script-card";
+    li.className = "page-card";
+    li.dataset.pageIndex = String(page.index);
+    if (state.lastInsertedIndex === page.index) {
+      li.classList.add("is-just-inserted");
+    }
+    const busy = state.busyPages.has(page.index) || page.status === "generating";
+    const insertingHere = state.insertingAfter === page.index;
+    const statusClass =
+      page.status === "done"
+        ? "pill-ok"
+        : page.status === "error"
+        ? "pill-err"
+        : busy
+        ? "pill-warn"
+        : "";
+
     li.innerHTML = `
-      <span class="page-index-badge">${page.index}</span>
+      <div class="page-thumb">
+        ${
+          page.preview_url
+            ? `<img src="${page.preview_url}" alt="Página ${page.index}" loading="lazy" />`
+            : `<span>${busy ? "Gerando…" : `Página ${page.index}`}</span>`
+        }
+      </div>
       <div class="page-card-body">
+        <div class="page-card-head">
+          <div class="page-card-title-group">
+            <span class="page-index-badge">${page.index}</span>
+            <strong class="page-scene-title"></strong>
+            <span class="pill ${statusClass}">${STATUS_LABEL[busy ? "generating" : page.status] || page.status}</span>
+          </div>
+        </div>
         <div class="field-row">
           <label class="field-label">
             <span>Título da cena</span>
-            <input class="field script-title" type="text" placeholder="Página ${page.index}" />
+            <input class="field page-title-input" type="text" placeholder="Página ${page.index}" />
           </label>
           <label class="field-label">
-            <span>Texto / legenda da página</span>
-            <input class="field script-caption" type="text" placeholder="Fala ou legenda que aparece no livro" />
+            <span>Texto ou legenda</span>
+            <input class="field page-caption-input" type="text" placeholder="Fala ou legenda desta página (opcional)" />
           </label>
         </div>
-        <label class="field-label">
+        <label class="field-label field-grow">
           <span>Prompt visual da cena</span>
-          <textarea class="field script-prompt" rows="2"></textarea>
+          <textarea class="field page-prompt-input" rows="3"></textarea>
         </label>
-        <div class="chip-row script-chips"></div>
+        <div class="chip-row page-chips"></div>
+        ${page.error ? `<p class="error-msg"></p>` : ""}
+      </div>
+      <div class="page-card-footer">
+        <div class="card-actions">
+          <button class="btn btn-primary btn-sm page-gen-btn" type="button" ${busy ? "disabled" : ""}>
+            ${page.status === "done" ? "Refazer" : "Gerar página"}
+          </button>
+          <button class="btn btn-outline btn-sm page-insert-btn" type="button" ${insertingAny ? "disabled" : ""} title="Gera uma nova página conectada entre esta cena e a próxima">
+            ${insertingHere ? "Criando cena…" : "Nova página"}
+          </button>
+        </div>
+        ${
+          page.status === "done"
+            ? `<div class="card-actions">
+                 <button class="btn btn-outline btn-sm page-style-btn" type="button">Usar fonte desta página</button>
+                 <a class="btn btn-ghost btn-sm" href="${page.image_url}" download>PNG 300 DPI</a>
+               </div>`
+            : ""
+        }
       </div>
     `;
-    const titleEl = li.querySelector(".script-title");
-    const capEl = li.querySelector(".script-caption");
-    const promptEl = li.querySelector(".script-prompt");
+
+    const sceneTitleEl = li.querySelector(".page-scene-title");
+    const titleEl = li.querySelector(".page-title-input");
+    const capEl = li.querySelector(".page-caption-input");
+    const promptEl = li.querySelector(".page-prompt-input");
+    sceneTitleEl.textContent = page.title || `Página ${page.index}`;
     titleEl.value = page.title || "";
     capEl.value = page.caption_text || "";
     promptEl.value = page.prompt || "";
+    if (page.error) li.querySelector(".error-msg").textContent = page.error;
 
-    const savePage = debounce(async () => {
+    const thumbImg = li.querySelector(".page-thumb img");
+    if (thumbImg) {
+      thumbImg.addEventListener("click", () => {
+        const items = donePages.map((p) => ({
+          url: p.view_url,
+          caption: `Página ${p.index}${p.title ? `: ${p.title}` : ""}`,
+        }));
+        const idx = donePages.findIndex((p) => p.index === page.index);
+        openLightbox(items, Math.max(0, idx));
+      });
+    }
+
+    const saveEdits = debounce(async () => {
       try {
         await api(`/api/sessions/${state.sid}/pages/${page.index}`, {
           method: "PATCH",
           body: JSON.stringify({
             title: titleEl.value,
-            caption_text: capEl.value,
             prompt: promptEl.value,
+            caption_text: capEl.value,
           }),
         });
         page.title = titleEl.value;
-        page.caption_text = capEl.value;
         page.prompt = promptEl.value;
+        page.caption_text = capEl.value;
+        sceneTitleEl.textContent = titleEl.value.trim() || `Página ${page.index}`;
       } catch (err) {
         toast(err.message, true);
       }
     }, 450);
+    titleEl.addEventListener("input", () => {
+      sceneTitleEl.textContent = titleEl.value.trim() || `Página ${page.index}`;
+      saveEdits();
+    });
+    promptEl.addEventListener("input", saveEdits);
+    capEl.addEventListener("input", saveEdits);
 
-    titleEl.addEventListener("input", savePage);
-    capEl.addEventListener("input", savePage);
-    promptEl.addEventListener("input", savePage);
+    li.querySelector(".page-gen-btn").addEventListener("click", () =>
+      generateOnePage(page.index, promptEl.value, capEl.value, page.character_ids)
+    );
 
-    renderCharacterChips(li.querySelector(".script-chips"), page, allChars);
+    li.querySelector(".page-insert-btn").addEventListener("click", () =>
+      insertContextualPage(page.index)
+    );
+
+    const styleBtn = li.querySelector(".page-style-btn");
+    if (styleBtn) {
+      styleBtn.addEventListener("click", async () => {
+        try {
+          await api(`/api/sessions/${state.sid}/pages/${page.index}/use-as-style`, { method: "POST" });
+          await reloadSession();
+          toast(`Página ${page.index} definida como referência de texto.`);
+          await detectReferenceTypography(true);
+        } catch (err) {
+          toast(err.message, true);
+        }
+      });
+    }
+
+    renderCharacterChips(li.querySelector(".page-chips"), page, allChars);
     list.appendChild(li);
+  }
+}
+
+async function insertContextualPage(afterIndex) {
+  if (state.insertingAfter !== null) return;
+  state.insertingAfter = afterIndex;
+  renderStage3StoryAndPages();
+  try {
+    const res = await api(`/api/sessions/${state.sid}/pages/insert`, {
+      method: "POST",
+      body: JSON.stringify({ after_index: afterIndex }),
+    });
+    state.lastInsertedIndex = res.inserted_index;
+    state.insertingAfter = null;
+    await reloadSession();
+    const insertedCard = document.querySelector(`.page-card[data-page-index="${res.inserted_index}"]`);
+    if (insertedCard) {
+      animateStageEnter(insertedCard);
+      insertedCard.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    const hasNext = res.inserted_index < res.total_pages;
+    toast(
+      hasNext
+        ? `Página ${res.inserted_index} criada entre as páginas ${afterIndex} e ${res.inserted_index + 1}.`
+        : `Página ${res.inserted_index} criada na sequência da página ${afterIndex}.`
+    );
+    setTimeout(() => {
+      if (state.lastInsertedIndex === res.inserted_index) {
+        state.lastInsertedIndex = null;
+        insertedCard?.classList.remove("is-just-inserted");
+      }
+    }, 3500);
+  } catch (err) {
+    state.insertingAfter = null;
+    renderStage3StoryAndPages();
+    toast(err.message, true);
   }
 }
 
@@ -518,122 +697,12 @@ function renderCharacterChips(container, page, chars) {
           method: "PATCH",
           body: JSON.stringify({ character_ids: nextIds }),
         });
-        renderStage3Story();
-        renderStage4Pages();
+        renderStage3StoryAndPages();
       } catch (err) {
         toast(err.message, true);
       }
     });
     container.appendChild(btn);
-  }
-}
-
-function renderStage4Pages() {
-  const s = state.session;
-  if (!s) return;
-
-  const list = $("#page-list");
-  list.innerHTML = "";
-  const allChars = allSelectableCharacters();
-  const donePages = s.pages.filter((p) => p.status === "done" && p.view_url);
-
-  for (const page of s.pages) {
-    const li = document.createElement("li");
-    li.className = "page-card";
-    const busy = state.busyPages.has(page.index) || page.status === "generating";
-    const statusClass =
-      page.status === "done"
-        ? "pill-ok"
-        : page.status === "error"
-        ? "pill-err"
-        : busy
-        ? "pill-warn"
-        : "";
-
-    li.innerHTML = `
-      <div class="page-thumb">
-        ${
-          page.preview_url
-            ? `<img src="${page.preview_url}" alt="Página ${page.index}" loading="lazy" />`
-            : `<span>${busy ? "Gerando…" : `Página ${page.index}`}</span>`
-        }
-      </div>
-      <div class="page-card-body">
-        <div class="page-card-head">
-          <div style="display: flex; align-items: center; gap: 10px;">
-            <span class="page-index-badge">${page.index}</span>
-            <strong class="page-scene-title"></strong>
-            <span class="pill ${statusClass}">${STATUS_LABEL[busy ? "generating" : page.status] || page.status}</span>
-          </div>
-          <div class="topbar-actions">
-            <button class="btn btn-primary btn-sm page-gen-btn" type="button" ${busy ? "disabled" : ""}>
-              ${page.status === "done" ? "Regenerar" : "Gerar página"}
-            </button>
-            ${
-              page.status === "done"
-                ? `<button class="btn btn-outline btn-sm page-style-btn" type="button">Usar fonte desta página</button>
-                   <a class="btn btn-ghost btn-sm" href="${page.image_url}" download>PNG 300 DPI</a>`
-                : ""
-            }
-          </div>
-        </div>
-        <textarea class="field page-prompt-input" rows="2"></textarea>
-        <input class="field page-caption-input" type="text" placeholder="Texto / legenda desta página (opcional)" />
-        <div class="chip-row page-chips"></div>
-        ${page.error ? `<p class="error-msg" style="margin: 0;"></p>` : ""}
-      </div>
-    `;
-
-    li.querySelector(".page-scene-title").textContent = page.title || `Página ${page.index}`;
-    const promptEl = li.querySelector(".page-prompt-input");
-    const capEl = li.querySelector(".page-caption-input");
-    promptEl.value = page.prompt || "";
-    capEl.value = page.caption_text || "";
-    if (page.error) li.querySelector(".error-msg").textContent = page.error;
-
-    const thumbImg = li.querySelector(".page-thumb img");
-    if (thumbImg) {
-      thumbImg.addEventListener("click", () => {
-        const items = donePages.map((p) => ({
-          url: p.view_url,
-          caption: `Página ${p.index}${p.title ? ` — ${p.title}` : ""}`,
-        }));
-        const idx = donePages.findIndex((p) => p.index === page.index);
-        openLightbox(items, Math.max(0, idx));
-      });
-    }
-
-    const saveEdits = debounce(async () => {
-      await api(`/api/sessions/${state.sid}/pages/${page.index}`, {
-        method: "PATCH",
-        body: JSON.stringify({ prompt: promptEl.value, caption_text: capEl.value }),
-      }).catch(() => {});
-      page.prompt = promptEl.value;
-      page.caption_text = capEl.value;
-    }, 450);
-    promptEl.addEventListener("input", saveEdits);
-    capEl.addEventListener("input", saveEdits);
-
-    li.querySelector(".page-gen-btn").addEventListener("click", () =>
-      generateOnePage(page.index, promptEl.value, capEl.value, page.character_ids)
-    );
-
-    const styleBtn = li.querySelector(".page-style-btn");
-    if (styleBtn) {
-      styleBtn.addEventListener("click", async () => {
-        try {
-          await api(`/api/sessions/${state.sid}/pages/${page.index}/use-as-style`, { method: "POST" });
-          await reloadSession();
-          toast(`Página ${page.index} definida como referência de texto deste livro!`);
-          await detectReferenceTypography(true);
-        } catch (err) {
-          toast(err.message, true);
-        }
-      });
-    }
-
-    renderCharacterChips(li.querySelector(".page-chips"), page, allChars);
-    list.appendChild(li);
   }
 }
 
@@ -708,7 +777,7 @@ function renderExtraPageList(pages, listEl, emptyEl) {
     }
     if (page.error) card.querySelector(".error-msg").textContent = page.error;
     const visualBtn = card.querySelector(".extra-visual-btn");
-    visualBtn.textContent = page.preview_url ? "Regenerar página" : "Gerar página";
+    visualBtn.textContent = page.preview_url ? "Refazer página" : "Gerar página";
     updateExtraThumb(card, page);
 
     const applyUpdate = (updated) => {
@@ -719,7 +788,7 @@ function renderExtraPageList(pages, listEl, emptyEl) {
         downloadEl.classList.remove("is-hidden");
       }
       card.querySelector(".extra-visual-btn").textContent = page.preview_url
-        ? "Regenerar página"
+        ? "Refazer página"
         : "Gerar página";
       updateExtraThumb(card, page);
     };
@@ -773,12 +842,12 @@ function renderExtraPageList(pages, listEl, emptyEl) {
         applyUpdate(updated);
         state.session.pdf_ready = false;
         renderHeaderAndStepper();
-        toast("Página gerada!");
+        toast("Página gerada.");
       } catch (err) {
         toast(err.message, true);
       } finally {
         btn.disabled = false;
-        btn.textContent = page.preview_url ? "Regenerar página" : "Gerar página";
+        btn.textContent = page.preview_url ? "Refazer página" : "Gerar página";
       }
     });
 
@@ -847,7 +916,7 @@ function renderStage5Finalize() {
     s.cover_status === "generating"
       ? "Gerando capa…"
       : s.cover_preview_url
-      ? "Regerar capa"
+      ? "Refazer capa"
       : "Gerar capa";
   const download = $("#cover-download");
   download.classList.toggle("is-hidden", !s.cover_download_url);
@@ -866,7 +935,7 @@ function renderStage5Finalize() {
   $("#kdp-color-test").checked = Boolean(s.include_color_test_page);
 
   const pdfReady = Boolean(s.pdf_ready && s.pdf_url);
-  $("#pdf-final-status").textContent = pdfReady ? "PDF pronto" : "PDF não gerado";
+  $("#pdf-final-status").textContent = pdfReady ? "Prévia pronta" : "PDF ainda não gerado";
   const pdfLink = $("#pdf-final-link");
   pdfLink.classList.toggle("is-hidden", !pdfReady);
   if (pdfReady) pdfLink.href = s.pdf_url;
@@ -881,8 +950,7 @@ function renderAll() {
   renderPresets();
   renderStage1Form();
   renderStage2Characters();
-  renderStage3Story();
-  renderStage4Pages();
+  renderStage3StoryAndPages();
   renderStage5Finalize();
   syncAllPopoverSelects();
 }
@@ -893,7 +961,7 @@ async function reloadSession() {
   renderAll();
 }
 
-async function saveStyleConfig() {
+async function saveStyleConfig({ silent = false } = {}) {
   const payload = {
     title: $("#session-title").value.trim(),
     context_prompt: $("#context").value.trim(),
@@ -907,6 +975,12 @@ async function saveStyleConfig() {
       denoise: $("#proc-denoise").checked,
       crop_to_content: $("#proc-crop").checked,
     },
+    caption_enabled: $("#caption-enabled").checked,
+    caption_style: $("#caption-style").value,
+    caption_position: $("#caption-position").value,
+    caption_font_family: $("#caption-font").value,
+    caption_font_bold: $("#caption-weight").value === "bold",
+    caption_font_size: Number($("#caption-size").value) || 0.032,
   };
   try {
     state.session = await api(`/api/sessions/${state.sid}`, {
@@ -914,9 +988,11 @@ async function saveStyleConfig() {
       body: JSON.stringify(payload),
     });
     renderAll();
-    toast("Padrões do livro salvos.");
+    if (!silent) toast("Padrões do livro salvos.");
+    return true;
   } catch (err) {
     toast(err.message, true);
+    return false;
   }
 }
 
@@ -930,26 +1006,26 @@ async function detectReferenceTypography(silent = false) {
     const res = await api(`/api/sessions/${state.sid}/style/detect`, { method: "POST" });
     await reloadSession();
     if (res.typography_error) {
-      toast("Não consegui detectar a fonte da imagem. Ajuste manualmente.", true);
+      toast("Não foi possível detectar a fonte na imagem. Escolha a fonte manualmente.", true);
       return;
     }
     const fontLabels = { sans: "Sans", serif: "Serif", mono: "Mono" };
     const label = fontLabels[res.font_family] || "Sans";
     const weight = res.font_bold ? "Negrito" : "Normal";
-    if (!silent) toast(`Fonte detectada: ${label} · ${weight}`);
+    if (!silent) toast(`Fonte detectada: ${label}, ${weight}.`);
   } catch (err) {
     if (!silent) toast(err.message || "Falha ao detectar a fonte.", true);
   } finally {
     if (btn) {
       btn.disabled = false;
-      btn.textContent = "Detectar fonte da imagem";
+      btn.textContent = "Detectar fonte na imagem";
     }
   }
 }
 
 async function generateOnePage(index, prompt, captionText, characterIds) {
   state.busyPages.add(index);
-  renderStage4Pages();
+  renderStage3StoryAndPages();
   try {
     await api(`/api/sessions/${state.sid}/pages/${index}/generate`, {
       method: "POST",
@@ -962,12 +1038,12 @@ async function generateOnePage(index, prompt, captionText, characterIds) {
       }),
     });
     await reloadSession();
-    toast(`Página ${index} gerada!`);
+    toast(`Página ${index} gerada.`);
   } catch (err) {
     toast(err.message, true);
   } finally {
     state.busyPages.delete(index);
-    renderStage4Pages();
+    renderStage3StoryAndPages();
   }
 }
 
@@ -983,7 +1059,7 @@ async function generateAllPending() {
     await generateOnePage(page.index, page.prompt, page.caption_text, page.character_ids);
   }
   btn.disabled = false;
-  toast("Fila de geração concluída!");
+  toast("Fila de geração concluída.");
 }
 
 async function composePdfAction() {
@@ -1011,7 +1087,7 @@ async function composePdfAction() {
     state.session = await api(`/api/sessions/${state.sid}/compose`, { method: "POST" });
     renderHeaderAndStepper();
     renderStage5Finalize();
-    toast("PDF KDP pronto para download!");
+    toast("Prévia em PDF pronta.");
   } catch (err) {
     if (errorEl) {
       errorEl.textContent = err.message;
@@ -1019,8 +1095,8 @@ async function composePdfAction() {
     }
     toast(err.message, true);
   } finally {
-    topBtn.textContent = "Gerar PDF KDP";
-    if (finalBtn) finalBtn.textContent = "Gerar PDF final";
+    topBtn.textContent = "Gerar prévia PDF";
+    if (finalBtn) finalBtn.textContent = "Gerar prévia PDF";
     renderHeaderAndStepper();
     renderStage5Finalize();
   }
@@ -1034,9 +1110,7 @@ function openLightbox(items, index) {
   updateLightbox();
   const box = $("#lightbox");
   box.classList.remove("is-hidden");
-  if (typeof window.gsap !== "undefined") {
-    window.gsap.fromTo(box, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.2, clearProps: "opacity,visibility" });
-  }
+  animateLightboxOpen(box);
 }
 
 function updateLightbox() {
@@ -1108,7 +1182,7 @@ async function pollAutopilot() {
         await reloadSession();
         if (st.status === "done") {
           setStep(st.current_step || 4, { animate: true, persist: false });
-          toast(st.label || "Autopilot concluído!");
+          toast(st.label || "Geração automática concluída.");
         }
       }
     }
@@ -1117,11 +1191,11 @@ async function pollAutopilot() {
 
 async function triggerAutopilot(stopAfter) {
   try {
-    await saveStyleConfig();
+    const saved = await saveStyleConfig({ silent: true });
+    if (!saved) return;
     const st = await api(`/api/sessions/${state.sid}/autopilot`, {
       method: "POST",
       body: JSON.stringify({
-        preset_id: state.session.preset_id,
         pages: state.session.pages.length || 12,
         premise_hint: $("#story-premise").value.trim(),
         language: $("#story-language")?.value || state.session.language || "en",
@@ -1132,7 +1206,7 @@ async function triggerAutopilot(stopAfter) {
     if (!state.autopilotTimer) {
       state.autopilotTimer = setInterval(pollAutopilot, 1800);
     }
-    toast("Autopilot iniciado! Acompanhe o progresso acima.");
+    toast("Geração automática iniciada. Acompanhe o progresso acima.");
   } catch (err) {
     toast(err.message, true);
   }
@@ -1189,6 +1263,53 @@ async function refreshAuth() {
 
 /* ==================== BINDINGS & INIT ==================== */
 function bindEvents() {
+  $("#kdp-interior-btn").addEventListener("click", async () => {
+    const button = $("#kdp-interior-btn");
+    const result = $("#kdp-preflight-result");
+    button.disabled = true;
+    try {
+      const response = await fetch(`/api/sessions/${state.sid}/kdp-interior`, { method: "POST" });
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(Array.isArray(data.detail) ? data.detail.join(" ") : data.detail);
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "miolo-kdp.pdf";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      result.textContent = "Miolo gerado para revisão.";
+    } catch (err) {
+      result.textContent = err.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+  $("#kdp-preflight-btn").addEventListener("click", async () => {
+    const result = $("#kdp-preflight-result");
+    result.replaceChildren();
+    try {
+      const report = await api(`/api/sessions/${state.sid}/kdp-preflight`);
+      const count = document.createElement("p");
+      count.textContent = `Páginas previstas: ${report.physical_pages}. Contagem KDP: ${report.kdp_pages}.`;
+      result.appendChild(count);
+      for (const [label, items] of [["Pendências", report.errors], ["Revisões", report.warnings]]) {
+        if (!items.length) continue;
+        const heading = document.createElement("strong");
+        heading.textContent = label;
+        const list = document.createElement("ul");
+        for (const message of items) {
+          const item = document.createElement("li");
+          item.textContent = message;
+          list.appendChild(item);
+        }
+        result.append(heading, list);
+      }
+    } catch (err) {
+      result.textContent = err.message;
+    }
+  });
   $$(".step-tab").forEach((tab) => {
     tab.addEventListener("click", () => setStep(Number(tab.dataset.step)));
   });
@@ -1209,8 +1330,14 @@ function bindEvents() {
     }, 500)
   );
 
-  $("#provider").addEventListener("change", () => renderModelSuggestions({ forceCheapest: true }));
-  $("#save-style-config").addEventListener("click", saveStyleConfig);
+  $("#provider").addEventListener("change", () => {
+    renderModelSuggestions({ forceCheapest: true });
+    renderAutopilotSummary();
+  });
+  for (const sel of ["#page-size", "#model", "#caption-enabled", "#caption-font", "#caption-weight"]) {
+    $(sel).addEventListener("change", renderAutopilotSummary);
+  }
+  $("#save-style-config").addEventListener("click", () => saveStyleConfig());
   $("#style-detect-btn").addEventListener("click", () => detectReferenceTypography());
   $("#autopilot-full-btn").addEventListener("click", () => triggerAutopilot("pdf"));
   $("#autopilot-plan-btn").addEventListener("click", () => triggerAutopilot("blueprint"));
@@ -1223,9 +1350,14 @@ function bindEvents() {
   $("#save-custom-preset-btn").addEventListener("click", () => {
     $("#custom-preset-name").value = "";
     $("#custom-preset-tagline").value = "";
-    $("#preset-modal").classList.remove("is-hidden");
+    const modal = $("#preset-modal");
+    modal.classList.remove("is-hidden");
+    animateModalOpen(modal);
   });
   $("#preset-modal-close").addEventListener("click", () => $("#preset-modal").classList.add("is-hidden"));
+  $("#preset-modal").addEventListener("click", (ev) => {
+    if (ev.target === $("#preset-modal")) $("#preset-modal").classList.add("is-hidden");
+  });
   $("#custom-preset-save").addEventListener("click", async () => {
     const name = $("#custom-preset-name").value.trim();
     if (!name) return toast("Informe um nome para o preset.", true);
@@ -1249,7 +1381,7 @@ function bindEvents() {
       state.presets = await api("/api/presets");
       $("#preset-modal").classList.add("is-hidden");
       renderPresets();
-      toast(`Preset "${created.name}" salvo!`);
+      toast(`Preset "${created.name}" salvo.`);
     } catch (err) {
       toast(err.message, true);
     }
@@ -1269,13 +1401,13 @@ function bindEvents() {
         body: JSON.stringify({ sample_subject: $("#style-sample-subject").value.trim() }),
       });
       await reloadSession();
-      toast("Amostra visual de traço gerada!");
+      toast("Amostra de traço gerada.");
     } catch (err) {
       errEl.textContent = err.message;
       errEl.classList.remove("is-hidden");
     } finally {
       btn.disabled = false;
-      btn.textContent = "Gerar amostra visual";
+      btn.textContent = "Gerar amostra de traço";
     }
   });
 
@@ -1351,7 +1483,7 @@ function bindEvents() {
         body: JSON.stringify({ mode }),
       });
       state.session.story_mode = mode;
-      renderStage3Story();
+      renderStage3StoryAndPages();
     });
   });
 
@@ -1407,13 +1539,13 @@ function bindEvents() {
         }),
       });
       await reloadSession();
-      toast(`Roteiro criado com ${res.pages_updated} página(s) prontas!`);
+      toast(`Roteiro criado com ${plural(res.pages_updated, "página pronta", "páginas prontas")}.`);
     } catch (err) {
       errEl.textContent = err.message;
       errEl.classList.remove("is-hidden");
     } finally {
       btn.disabled = false;
-      btn.textContent = "Gerar roteiro e dividir páginas";
+      btn.textContent = "Gerar roteiro";
     }
   });
 
@@ -1547,7 +1679,7 @@ function bindEvents() {
         }),
       });
       await reloadSession();
-      toast("Capa gerada!");
+      toast("Capa gerada.");
     } catch (err) {
       errEl.textContent = err.message;
       errEl.classList.remove("is-hidden");
@@ -1600,14 +1732,23 @@ function bindEvents() {
     updateLightbox();
   });
   document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") {
+      $("#preset-modal")?.classList.add("is-hidden");
+      $("#auth-modal")?.classList.add("is-hidden");
+      if (!$("#lightbox").classList.contains("is-hidden")) closeLightbox();
+      return;
+    }
     if ($("#lightbox").classList.contains("is-hidden")) return;
-    if (ev.key === "Escape") closeLightbox();
     if (ev.key === "ArrowLeft") $("#lightbox-prev").click();
     if (ev.key === "ArrowRight") $("#lightbox-next").click();
   });
 
   // Auth modal
-  $("#auth-pill").addEventListener("click", () => $("#auth-modal").classList.remove("is-hidden"));
+  $("#auth-pill").addEventListener("click", () => {
+    const modal = $("#auth-modal");
+    modal.classList.remove("is-hidden");
+    animateModalOpen(modal);
+  });
   $("#auth-modal-close").addEventListener("click", () => $("#auth-modal").classList.add("is-hidden"));
   $("#auth-modal").addEventListener("click", (ev) => {
     if (ev.target === $("#auth-modal")) $("#auth-modal").classList.add("is-hidden");

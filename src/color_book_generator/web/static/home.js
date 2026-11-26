@@ -1,8 +1,14 @@
 import { syncAllPopoverSelects } from "/static/popover-select.js";
-import { renderStylePicker } from "/static/style-picker.js";
+import { formatPageSize, renderStylePicker } from "/static/style-picker.js";
+import { animateCardsIn, animateDrawerOpen, animateModalOpen } from "/static/motion.js";
+import { fetchFontPresetFile, getFontPreset, renderFontPresetPicker } from "/static/font-presets.js";
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+function plural(n, one, many) {
+  return `${n} ${n === 1 ? one : many}`;
+}
 
 const CATEGORY_LABEL = {
   cozy: "Bold & Easy",
@@ -11,7 +17,7 @@ const CATEGORY_LABEL = {
   manhwa: "Manhwa",
   kawaii: "Kawaii",
   adult: "Adulto",
-  custom: "Custom",
+  custom: "Personalizado",
 };
 
 const state = {
@@ -24,7 +30,13 @@ const state = {
   searchQuery: "",
   defaults: null,
   codex: null,
+  codexModels: [],
+  codexCheapest: null,
   codexTimer: null,
+  styleFile: null,
+  stylePreviewUrl: null,
+  styleIsCustomUpload: false,
+  selectedFontPresetId: "cozy",
 };
 
 async function api(path, options = {}) {
@@ -55,18 +67,178 @@ function toast(message, isError = false) {
 }
 
 function animateBooks() {
-  if (typeof window.gsap === "undefined") return;
-  const mm = window.gsap.matchMedia();
-  mm.add("(prefers-reduced-motion: no-preference)", () => {
-    window.gsap.from(".book-card", {
-      y: 12,
-      autoAlpha: 0,
-      duration: 0.36,
-      stagger: 0.04,
-      ease: "power2.out",
-      clearProps: "transform,opacity,visibility",
-    });
+  animateCardsIn(".book-card");
+}
+
+function costRank(slug) {
+  const low = String(slug || "").toLowerCase();
+  if (low.includes("nano") || low.includes("spark") || low.includes("lite") || low.includes("flash") || low.includes("schnell")) return 0;
+  if (low.includes("mini") || low.includes("fast")) return 1;
+  if (low.includes("luna") || low.includes("small")) return 2;
+  if (low.includes("terra")) return 3;
+  return 4;
+}
+
+function renderBookProviders() {
+  const provSelect = $("#book-provider");
+  if (!provSelect) return;
+  const providers = state.defaults?.providers || ["codex", "openai", "gemini", "replicate", "local"];
+  const prev = provSelect.value;
+  provSelect.innerHTML = "";
+  for (const p of providers) {
+    const opt = document.createElement("option");
+    opt.value = p;
+    opt.textContent = p;
+    provSelect.appendChild(opt);
+  }
+  const useCodex = state.codex && state.codex.authenticated && !state.defaults?.openai_configured;
+  const preferred = prev || (useCodex ? "codex" : state.defaults?.provider || "openai");
+  provSelect.value = providers.includes(preferred) ? preferred : providers[0];
+  renderBookModels({ forceCheapest: !prev });
+}
+
+function renderBookModels({ forceCheapest = false } = {}) {
+  const select = $("#book-model");
+  const provider = $("#book-provider")?.value;
+  if (!select || !provider) return;
+  let models = [];
+  let cheapest = null;
+
+  if (provider === "codex") {
+    const raw = state.codexModels.length
+      ? [...state.codexModels]
+      : [state.defaults?.codex_model || "gpt-5.4-mini", "gpt-5.5", "gpt-6.2-sol"];
+    models = [...raw].sort((a, b) => costRank(a) - costRank(b));
+    cheapest = state.codexCheapest || models[0];
+    if (cheapest && models.includes(cheapest)) {
+      models = [cheapest, ...models.filter((m) => m !== cheapest)];
+    }
+  } else if (provider === "openai") {
+    models = ["gpt-image-1", "dall-e-3"];
+    cheapest = "gpt-image-1";
+  } else if (provider === "gemini") {
+    models = ["imagen-3.0-fast-generate-001", "imagen-3.0-generate-002"];
+    cheapest = "imagen-3.0-fast-generate-001";
+  } else if (provider === "replicate") {
+    models = ["black-forest-labs/flux-schnell", "black-forest-labs/flux-dev"];
+    cheapest = "black-forest-labs/flux-schnell";
+  } else if (provider === "local") {
+    models = ["stabilityai/stable-diffusion-xl-base-1.0"];
+    cheapest = models[0];
+  }
+
+  const current = forceCheapest ? cheapest : select.value || cheapest;
+  if (current && !models.includes(current)) models.push(current);
+
+  select.innerHTML = "";
+  for (const m of models) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    opt.textContent = m === cheapest ? `${m} (mais barato)` : m;
+    select.appendChild(opt);
+  }
+  if (current) select.value = current;
+  syncAllPopoverSelects();
+}
+
+function renderBookCaptionUI() {
+  const enabled = Boolean($("#book-caption-enabled")?.checked);
+  const opts = $("#book-caption-options");
+  if (opts) opts.style.opacity = enabled ? "1" : "0.5";
+  const fontLabels = { sans: "Sans", serif: "Serif", mono: "Mono" };
+  const font = fontLabels[$("#book-caption-font")?.value] || "Sans";
+  const weight = $("#book-caption-weight")?.value === "bold" ? "Negrito" : "Normal";
+  const statusEl = $("#book-style-typography-status");
+  if (statusEl) statusEl.textContent = `Fonte ativa: ${font}, ${weight}`;
+}
+
+function renderBookStylePreview() {
+  const preview = $("#book-style-preview");
+  const clearBtn = $("#book-style-clear");
+  if (!preview) return;
+  preview.innerHTML = "";
+  if (state.stylePreviewUrl) {
+    const img = document.createElement("img");
+    img.src = state.stylePreviewUrl;
+    img.alt = "Amostra de texto selecionada";
+    preview.appendChild(img);
+    clearBtn?.classList.remove("is-hidden");
+  } else {
+    const span = document.createElement("span");
+    span.textContent = "Nenhuma amostra de texto selecionada.";
+    preview.appendChild(span);
+    clearBtn?.classList.add("is-hidden");
+  }
+}
+
+function renderHomeFontPresets() {
+  renderFontPresetPicker({
+    root: $("#home-font-presets"),
+    selectedId: state.selectedFontPresetId,
+    onSelect: (fontPreset) => selectHomeFontPreset(fontPreset, { applyCaption: true }),
   });
+}
+
+async function selectHomeFontPreset(fontPreset, { applyCaption = true } = {}) {
+  if (!fontPreset) return;
+  if (state.stylePreviewUrl && state.stylePreviewUrl.startsWith("blob:")) {
+    URL.revokeObjectURL(state.stylePreviewUrl);
+  }
+  state.selectedFontPresetId = fontPreset.id;
+  state.styleIsCustomUpload = false;
+  state.stylePreviewUrl = fontPreset.imageUrl;
+  $("#book-style-file").value = "";
+  if (applyCaption && fontPreset.caption) {
+    const cap = fontPreset.caption;
+    $("#book-caption-enabled").checked = Boolean(cap.enabled);
+    $("#book-caption-style").value = cap.style || "caption";
+    $("#book-caption-position").value = cap.position || "bottom";
+    $("#book-caption-font").value = cap.font_family || "sans";
+    $("#book-caption-weight").value = cap.bold ? "bold" : "normal";
+    $("#book-caption-size").value = String(cap.font_size_ratio || 0.032);
+    renderBookCaptionUI();
+    syncAllPopoverSelects();
+  }
+  renderBookStylePreview();
+  renderHomeFontPresets();
+  try {
+    state.styleFile = await fetchFontPresetFile(fontPreset);
+  } catch (_) {}
+}
+
+function applyPresetToNewBookForm(preset) {
+  if (!preset) return;
+  $("#book-context").value = preset.context_prompt || "";
+  $("#book-negative-prompt").value = preset.negative_prompt || "";
+  $("#book-page-size").value = preset.page_size || "letter_8.5x11";
+
+  const proc = preset.processing || {};
+  $("#book-proc-threshold").value = proc.threshold || "adaptive";
+  $("#book-proc-min-px").value = proc.min_component_px ?? 24;
+  $("#book-proc-denoise").checked = proc.denoise ?? true;
+  $("#book-proc-crop").checked = proc.crop_to_content ?? true;
+
+  $("#book-kdp-blank-verso").checked = Boolean(preset.blank_verso);
+  $("#book-kdp-title-page").checked = preset.include_title_page ?? true;
+  $("#book-kdp-belongs-to").checked = Boolean(preset.include_belongs_to_page);
+  $("#book-kdp-color-test").checked = Boolean(preset.include_color_test_page);
+
+  const cap = preset.caption || {};
+  $("#book-caption-enabled").checked = Boolean(cap.enabled);
+  $("#book-caption-style").value = cap.style || "balloon";
+  $("#book-caption-position").value = cap.position || "bottom";
+  $("#book-caption-font").value = cap.font_family || "sans";
+  $("#book-caption-weight").value = cap.bold ? "bold" : "normal";
+  $("#book-caption-size").value = String(cap.font_size_ratio || 0.032);
+  renderBookCaptionUI();
+  syncAllPopoverSelects();
+
+  if (!state.styleIsCustomUpload) {
+    const matchedFont = getFontPreset(preset.category);
+    if (matchedFont) {
+      selectHomeFontPreset(matchedFont, { applyCaption: false });
+    }
+  }
 }
 
 function renderPresets() {
@@ -78,6 +250,7 @@ function renderPresets() {
     onSelect: (preset) => {
       state.selectedPresetId = preset.id;
       renderPresets();
+      applyPresetToNewBookForm(preset);
     },
   });
 }
@@ -106,8 +279,8 @@ function renderBooks({ animate = false } = {}) {
   empty.classList.toggle("is-hidden", visible.length > 0);
   if (!visible.length) {
     $("#empty-state-msg").textContent = totalCount
-      ? "Nenhum livro corresponde a esse filtro."
-      : "Nenhum livro no workspace ainda. Crie o primeiro para começar.";
+      ? "Nenhum livro corresponde a este filtro."
+      : "Sua biblioteca está vazia. Crie o primeiro livro para escolher o estilo, montar os personagens e gerar as páginas.";
     return;
   }
 
@@ -148,11 +321,11 @@ function renderBooks({ animate = false } = {}) {
         </div>
         <div class="book-meta-line">
           <span>${book.done}/${book.pages} págs</span>
-          <span>${(book.page_size || "letter").replace("_", " ")}</span>
+          <span>${formatPageSize(book.page_size)}</span>
           <span>${book.characters_count || 0} pers.</span>
         </div>
         <div class="book-actions">
-          <div style="display: flex; align-items: center; gap: 6px;">
+          <div class="book-actions-primary">
             <a class="btn btn-primary btn-sm" href="/books/${book.id}">Abrir</a>
             <a class="btn btn-outline btn-sm" href="/api/sessions/${book.id}/export">Exportar .zip</a>
           </div>
@@ -251,16 +424,19 @@ async function exportSelectedBooks() {
 
 function toggleCreator(open) {
   const form = $("#new-book-form");
+  const toolbar = $(".workspace-toolbar");
+  const library = $("#library-section");
+  const toggleBtn = $("#new-book-toggle");
   const shouldOpen = open === undefined ? form.classList.contains("is-hidden") : open;
   form.classList.toggle("is-hidden", !shouldOpen);
+  toolbar?.classList.toggle("is-hidden", shouldOpen);
+  library?.classList.toggle("is-hidden", shouldOpen);
+  if (toggleBtn) {
+    toggleBtn.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+    toggleBtn.textContent = shouldOpen ? "Voltar para livros" : "Novo livro";
+  }
   if (shouldOpen) {
-    if (typeof window.gsap !== "undefined") {
-      window.gsap.fromTo(
-        form,
-        { y: -8, autoAlpha: 0 },
-        { y: 0, autoAlpha: 1, duration: 0.3, ease: "power2.out", clearProps: "transform,opacity,visibility" }
-      );
-    }
+    animateDrawerOpen(form);
     $("#book-title").focus();
   }
 }
@@ -276,22 +452,8 @@ async function createBook(ev, { autopilot = false } = {}) {
   const premise = $("#book-premise").value.trim();
   const language = $("#book-language")?.value || "en";
 
-  if (!autopilot && !rawTitle) {
-    errEl.textContent = "Informe um título para criar em modo manual (ou use 'Gerar livro completo').";
-    errEl.classList.remove("is-hidden");
-    return;
-  }
-
-  const useCodex = state.codex && state.codex.authenticated && !state.defaults?.openai_configured;
-  const provider = useCodex ? "codex" : state.defaults?.provider || "openai";
-  const cheapestByProvider = {
-    codex: state.defaults?.codex_model || "gpt-5.4-mini",
-    openai: "gpt-image-1",
-    gemini: "imagen-3.0-fast-generate-001",
-    replicate: "black-forest-labs/flux-schnell",
-    local: "stabilityai/stable-diffusion-xl-base-1.0",
-  };
-  const model = cheapestByProvider[provider] || state.defaults?.model;
+  const provider = $("#book-provider")?.value || state.defaults?.provider || "openai";
+  const model = $("#book-model")?.value || state.defaults?.model || "gpt-image-1";
 
   const btn = autopilot ? $("#book-autopilot") : $("#book-create");
   const prevLabel = btn.textContent;
@@ -306,15 +468,38 @@ async function createBook(ev, { autopilot = false } = {}) {
         language,
         preset_id: state.selectedPresetId,
         story_premise: premise,
+        context_prompt: $("#book-context").value.trim(),
+        negative_prompt: $("#book-negative-prompt").value.trim(),
+        page_size: $("#book-page-size").value,
         provider,
         model,
+        processing: {
+          threshold: $("#book-proc-threshold").value,
+          min_component_px: Math.max(0, Number($("#book-proc-min-px").value) || 0),
+          denoise: $("#book-proc-denoise").checked,
+          crop_to_content: $("#book-proc-crop").checked,
+        },
+        blank_verso: $("#book-kdp-blank-verso").checked,
+        include_title_page: $("#book-kdp-title-page").checked,
+        include_belongs_to_page: $("#book-kdp-belongs-to").checked,
+        include_color_test_page: $("#book-kdp-color-test").checked,
+        caption_enabled: $("#book-caption-enabled").checked,
+        caption_style: $("#book-caption-style").value,
+        caption_position: $("#book-caption-position").value,
+        caption_font_family: $("#book-caption-font").value,
+        caption_font_bold: $("#book-caption-weight").value === "bold",
+        caption_font_size: Number($("#book-caption-size").value) || 0.032,
       }),
     });
+    if (state.styleFile) {
+      const form = new FormData();
+      form.append("image", state.styleFile);
+      await api(`/api/sessions/${created.id}/style`, { method: "POST", body: form });
+    }
     if (autopilot) {
       await api(`/api/sessions/${created.id}/autopilot`, {
         method: "POST",
         body: JSON.stringify({
-          preset_id: state.selectedPresetId,
           pages,
           premise_hint: premise,
           language,
@@ -372,6 +557,14 @@ async function refreshAuth() {
   try {
     state.codex = await api("/api/auth/codex");
     renderAuth();
+    if (state.codex.authenticated) {
+      const m = await api("/api/auth/codex/models").catch(() => null);
+      if (m?.models?.length) {
+        state.codexModels = m.models;
+        state.codexCheapest = m.cheapest || null;
+      }
+    }
+    renderBookProviders();
   } catch (_) {}
 }
 
@@ -395,7 +588,13 @@ async function importBackup() {
   try {
     const res = await api("/api/import", { method: "POST", body: form });
     fill.style.width = "100%";
-    toast(`Backup restaurado: ${res.sessions} livro(s), ${res.pages} página(s) ilustradas, ${res.extra_pages || 0} página(s) extra.`);
+    const extraCount = res.extra_pages || 0;
+    const summaryParts = [
+      plural(res.sessions, "livro", "livros"),
+      plural(res.pages, "página ilustrada", "páginas ilustradas"),
+    ];
+    if (extraCount > 0) summaryParts.push(plural(extraCount, "página extra", "páginas extras"));
+    toast(`Backup restaurado: ${summaryParts.join(", ")}.`);
     input.value = "";
     $("#backup-modal")?.classList.add("is-hidden");
     await Promise.all([loadBooks(), loadPresets()]);
@@ -420,6 +619,11 @@ async function loadPresets() {
   state.presets = presets;
   state.categories = categories;
   renderPresets();
+  const initialPreset = presets.find((p) => p.id === state.selectedPresetId) || presets[0];
+  if (initialPreset) {
+    state.selectedPresetId = initialPreset.id;
+    applyPresetToNewBookForm(initialPreset);
+  }
 }
 
 async function init() {
@@ -437,6 +641,8 @@ async function init() {
     refreshAuth(),
   ]);
   state.defaults = defaults;
+  renderBookProviders();
+  renderBookCaptionUI();
 
   $("#new-book-toggle").addEventListener("click", () => toggleCreator());
   $("#empty-create-btn").addEventListener("click", () => toggleCreator(true));
@@ -444,6 +650,35 @@ async function init() {
   $("#book-cancel-2").addEventListener("click", () => toggleCreator(false));
   $("#new-book-form").addEventListener("submit", (ev) => createBook(ev, { autopilot: false }));
   $("#book-autopilot").addEventListener("click", () => createBook(null, { autopilot: true }));
+  $("#book-provider").addEventListener("change", () => renderBookModels({ forceCheapest: true }));
+  for (const sel of ["#book-caption-enabled", "#book-caption-font", "#book-caption-weight"]) {
+    $(sel).addEventListener("change", renderBookCaptionUI);
+  }
+  $("#book-style-file").addEventListener("change", (ev) => {
+    const file = ev.target.files?.[0] || null;
+    if (state.stylePreviewUrl && state.stylePreviewUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(state.stylePreviewUrl);
+    }
+    state.styleFile = file;
+    state.styleIsCustomUpload = Boolean(file);
+    state.selectedFontPresetId = null;
+    state.stylePreviewUrl = file ? URL.createObjectURL(file) : null;
+    renderBookStylePreview();
+    renderHomeFontPresets();
+  });
+  $("#book-style-clear").addEventListener("click", () => {
+    if (state.stylePreviewUrl && state.stylePreviewUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(state.stylePreviewUrl);
+    }
+    state.styleFile = null;
+    state.styleIsCustomUpload = false;
+    state.selectedFontPresetId = null;
+    state.stylePreviewUrl = null;
+    $("#book-style-file").value = "";
+    renderBookStylePreview();
+    renderHomeFontPresets();
+  });
+  renderHomeFontPresets();
   $("#import-btn").addEventListener("click", importBackup);
 
   $$("[data-cat-filter]").forEach((btn) => {
@@ -465,7 +700,11 @@ async function init() {
     renderBooks();
   });
 
-  $("#backup-modal-open").addEventListener("click", () => $("#backup-modal").classList.remove("is-hidden"));
+  $("#backup-modal-open").addEventListener("click", () => {
+    const modal = $("#backup-modal");
+    modal.classList.remove("is-hidden");
+    animateModalOpen(modal);
+  });
   $("#backup-modal-close").addEventListener("click", () => $("#backup-modal").classList.add("is-hidden"));
   $("#backup-modal").addEventListener("click", (ev) => {
     if (ev.target === $("#backup-modal")) $("#backup-modal").classList.add("is-hidden");
@@ -477,7 +716,11 @@ async function init() {
     }
   });
 
-  $("#auth-pill").addEventListener("click", () => $("#auth-modal").classList.remove("is-hidden"));
+  $("#auth-pill").addEventListener("click", () => {
+    const modal = $("#auth-modal");
+    modal.classList.remove("is-hidden");
+    animateModalOpen(modal);
+  });
   $("#auth-modal-close").addEventListener("click", () => $("#auth-modal").classList.add("is-hidden"));
   $("#auth-modal").addEventListener("click", (ev) => {
     if (ev.target === $("#auth-modal")) $("#auth-modal").classList.add("is-hidden");

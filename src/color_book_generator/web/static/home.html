@@ -3,12 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Color Book Studio — Workspace</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232b1846'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23e6dcf5' stroke-width='2.4'/%3E%3C/svg%3E" />
+    <title>Color Book Studio | Biblioteca</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23181a24'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23dbece9' stroke-width='2.4'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/static/styles.css" />
     <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js" integrity="sha384-g4NTh/Iv5PPU4xPyhEWqPcwtNXOvdaDI8LLnyYfyNZOjKJeYQyjzQ9X5275eBjpt" crossorigin="anonymous" defer></script>
   </head>
   <body>
+    <a class="skip-link" href="#main-content">Ir para o conteúdo</a>
     <div class="app-shell">
       <header class="topbar">
         <a class="brand" href="/">
@@ -23,7 +24,7 @@
 
         <div class="topbar-meta">
           <button class="pill" id="auth-pill" type="button" title="Gerenciar conta ChatGPT Plus">
-            <span class="pill-dot"></span>
+            <span class="pill-dot" aria-hidden="true"></span>
             <span id="auth-pill-label">Verificando conta…</span>
           </button>
           <span class="pill" id="books-count">0 livros</span>
@@ -31,17 +32,16 @@
 
         <div class="topbar-actions">
           <button class="btn btn-outline btn-sm" id="backup-modal-open" type="button">Backup</button>
-          <button class="btn btn-primary btn-sm" id="new-book-toggle" type="button">+ Novo livro</button>
+          <button class="btn btn-primary btn-sm" id="new-book-toggle" type="button" aria-expanded="false" aria-controls="new-book-form">Novo livro</button>
         </div>
       </header>
 
-      <div class="server-banner is-hidden" id="server-banner">
-        Servidor desatualizado: reinicie <code>uv run cbg web</code> para carregar as últimas mudanças.
+      <div class="server-banner is-hidden" id="server-banner" role="alert">
+        O servidor está desatualizado. Reinicie <code>uv run cbg</code> para carregar as alterações recentes.
       </div>
 
-      <main class="workspace-main">
-        <!-- Workspace Toolbar -->
-        <section class="workspace-toolbar">
+      <main class="workspace-main" id="main-content">
+        <section class="workspace-toolbar" aria-label="Filtros e busca da biblioteca">
           <div class="workspace-toolbar-left">
             <h1 class="workspace-heading">Seus livros</h1>
             <div class="chip-row" id="category-filters" role="group" aria-label="Filtrar por categoria">
@@ -57,102 +57,255 @@
           <div class="workspace-toolbar-right">
             <button class="btn btn-accent btn-sm is-hidden" id="export-selected-btn" type="button">Exportar selecionados (0)</button>
             <button class="btn btn-ghost btn-sm is-hidden" id="clear-selection-btn" type="button">Limpar seleção</button>
-            <input id="book-search" class="field workspace-search" type="search" placeholder="Buscar livro…" aria-label="Buscar livro" />
+            <input id="book-search" class="field workspace-search" type="search" placeholder="Buscar por título…" aria-label="Buscar livro por título" />
           </div>
         </section>
 
-        <!-- Collapsible New Book Drawer (Stage 1 Lavender tone) -->
-        <form class="creator-drawer is-hidden" id="new-book-form">
+        <form class="creator-drawer is-hidden" id="new-book-form" aria-label="Criar novo livro">
           <div class="creator-drawer-head">
             <div>
               <h2>Novo livro</h2>
-              <p class="hint">Selecione um estilo e gere o livro inteiro direto, ou comece em branco.</p>
+              <p class="hint">Escolha um estilo e ajuste o livro antes de criar o rascunho ou gerar tudo com IA.</p>
             </div>
-            <button class="btn btn-ghost btn-sm" type="button" id="book-cancel">Fechar</button>
+            <button class="btn btn-ghost btn-sm" type="button" id="book-cancel">Voltar para biblioteca</button>
           </div>
 
           <div id="home-style-picker"></div>
 
-          <div class="field-row">
-            <label class="field-label">
-              <span>Título</span>
-              <input id="book-title" class="field" type="text" placeholder="Opcional no modo automático" />
-            </label>
-            <label class="field-label">
-              <span>Páginas</span>
-              <input id="book-pages" class="field" type="number" min="1" max="200" value="12" />
-            </label>
-            <label class="field-label">
-              <span>Idioma</span>
-              <select id="book-language" class="field">
-                <option value="en" selected>English</option>
-                <option value="pt-BR">Português (BR)</option>
-                <option value="es">Español</option>
-              </select>
-            </label>
-            <label class="field-label">
-              <span>Tema</span>
-              <input id="book-premise" class="field" type="text" placeholder="Opcional" />
-            </label>
+          <div class="creator-grid-3">
+            <!-- Coluna 1: Identidade e traço -->
+            <div class="floating-card">
+              <h3>Identidade e traço</h3>
+              <label class="field-label">
+                <span>Título</span>
+                <input id="book-title" class="field" type="text" placeholder="Ex.: Floresta dos Amigos" />
+              </label>
+
+              <div class="field-row field-row-2">
+                <label class="field-label">
+                  <span>Páginas</span>
+                  <input id="book-pages" class="field" type="number" min="1" max="200" value="12" />
+                </label>
+                <label class="field-label">
+                  <span>Idioma</span>
+                  <select id="book-language" class="field">
+                    <option value="en" selected>English</option>
+                    <option value="pt-BR">Português (BR)</option>
+                    <option value="es">Español</option>
+                  </select>
+                </label>
+              </div>
+
+              <label class="field-label">
+                <span>Tema (opcional)</span>
+                <input id="book-premise" class="field" type="text" placeholder="Ex.: Dia chuvoso na cabana" />
+              </label>
+
+              <label class="field-label field-grow">
+                <span>Prompt de estilo</span>
+                <textarea id="book-context" class="field" rows="4" spellcheck="false"></textarea>
+              </label>
+
+              <label class="field-label">
+                <span>Evitar no desenho</span>
+                <input id="book-negative-prompt" class="field" type="text" spellcheck="false" />
+              </label>
+            </div>
+
+            <!-- Coluna 2: Formato, IA e impressão -->
+            <div class="floating-card">
+              <h3>Formato, IA e impressão</h3>
+              <label class="field-label">
+                <span>Formato</span>
+                <select id="book-page-size" class="field">
+                  <option value="square_8.5x8.5">Quadrado 8.5 x 8.5 in</option>
+                  <option value="letter_8.5x11">Carta 8.5 x 11 in</option>
+                  <option value="6x9">6 x 9 in</option>
+                  <option value="square_8x8">Quadrado 8 x 8 in</option>
+                  <option value="8x10">8 x 10 in</option>
+                  <option value="a4">A4</option>
+                </select>
+              </label>
+
+              <div class="field-row field-row-2">
+                <label class="field-label">
+                  <span>Provedor</span>
+                  <select id="book-provider" class="field"></select>
+                </label>
+                <label class="field-label">
+                  <span>Modelo</span>
+                  <select id="book-model" class="field"></select>
+                </label>
+              </div>
+
+              <div class="field-row field-row-2">
+                <label class="field-label">
+                  <span>Conversão P&amp;B</span>
+                  <select id="book-proc-threshold" class="field">
+                    <option value="otsu">Otsu (traço firme)</option>
+                    <option value="adaptive">Adaptativo (traço fino)</option>
+                    <option value="fixed">Limiar fixo</option>
+                  </select>
+                </label>
+                <label class="field-label">
+                  <span>Remover ruído (px)</span>
+                  <input id="book-proc-min-px" class="field" type="number" min="0" max="200" value="24" />
+                </label>
+              </div>
+
+              <div class="kdp-toggles">
+                <label class="check-toggle">
+                  <input type="checkbox" id="book-proc-denoise" checked />
+                  <span>Suavizar ruído</span>
+                </label>
+                <label class="check-toggle">
+                  <input type="checkbox" id="book-proc-crop" checked />
+                  <span>Recortar margens</span>
+                </label>
+              </div>
+
+              <div class="kdp-toggles-grid kdp-toggles-divided">
+                <label class="check-toggle">
+                  <input type="checkbox" id="book-kdp-blank-verso" />
+                  <span>Verso em branco</span>
+                </label>
+                <label class="check-toggle">
+                  <input type="checkbox" id="book-kdp-title-page" checked />
+                  <span>Folha de rosto</span>
+                </label>
+                <label class="check-toggle">
+                  <input type="checkbox" id="book-kdp-belongs-to" />
+                  <span>"Este livro pertence a"</span>
+                </label>
+                <label class="check-toggle">
+                  <input type="checkbox" id="book-kdp-color-test" />
+                  <span>Teste de cores</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Coluna 3: Referência de texto e fonte -->
+            <div class="floating-card">
+              <h3>Referência de texto e fonte</h3>
+              <p class="hint hint-xs">
+                Escolha um preset por estilo de livro ou envie sua própria amostra de letra.
+              </p>
+              <div class="anchor-preview anchor-preview-text" id="book-style-preview">
+                <span>Nenhuma amostra de texto selecionada.</span>
+              </div>
+              <div id="home-font-presets" aria-label="Presets de referência de fonte"></div>
+              <p class="hint hint-xs" id="book-style-typography-status">
+                Fonte ativa: Sans, Normal
+              </p>
+              <label class="check-toggle">
+                <input type="checkbox" id="book-caption-enabled" />
+                <span>Exibir legenda ou balão de fala</span>
+              </label>
+              <div id="book-caption-options" class="stack-xs">
+                <div class="field-row field-row-2">
+                  <label class="field-label">
+                    <span>Estilo</span>
+                    <select id="book-caption-style" class="field">
+                      <option value="balloon">Balão de fala</option>
+                      <option value="caption">Legenda</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    <span>Posição</span>
+                    <select id="book-caption-position" class="field">
+                      <option value="bottom">Base</option>
+                      <option value="top">Topo</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="field-row field-row-3">
+                  <label class="field-label">
+                    <span>Fonte</span>
+                    <select id="book-caption-font" class="field">
+                      <option value="sans">Sans</option>
+                      <option value="serif">Serif</option>
+                      <option value="mono">Mono</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    <span>Peso</span>
+                    <select id="book-caption-weight" class="field">
+                      <option value="normal">Normal</option>
+                      <option value="bold">Negrito</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    <span>Tamanho</span>
+                    <select id="book-caption-size" class="field">
+                      <option value="0.024">Pequeno</option>
+                      <option value="0.032" selected>Médio</option>
+                      <option value="0.04">Grande</option>
+                      <option value="0.048">Extra</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div class="field-row field-row-file">
+                <input id="book-style-file" class="field field-file" type="file" accept="image/*" aria-label="Selecionar amostra de texto" />
+                <button class="btn btn-ghost btn-sm is-hidden" id="book-style-clear" type="button">Remover</button>
+              </div>
+            </div>
           </div>
 
-          <div class="topbar-actions" style="flex-wrap: wrap;">
+          <div class="card-actions">
             <button class="btn btn-accent btn-sm" type="button" id="book-autopilot">Gerar livro completo</button>
             <button class="btn btn-primary btn-sm" type="submit" id="book-create">Criar rascunho</button>
             <button class="btn btn-outline btn-sm" type="button" id="book-cancel-2">Cancelar</button>
           </div>
-          <p class="error-msg is-hidden" id="new-book-error"></p>
+          <p class="error-msg is-hidden" id="new-book-error" role="alert"></p>
         </form>
 
-        <!-- Projects Grid -->
-        <section id="library-section">
+        <section id="library-section" aria-label="Lista de livros">
           <ul class="book-grid" id="book-grid"></ul>
           <div class="empty-state is-hidden" id="empty-state">
-            <p id="empty-state-msg">Nenhum livro encontrado.</p>
-            <button class="btn btn-primary btn-sm" id="empty-create-btn" type="button">+ Novo livro</button>
+            <p id="empty-state-msg">Sua biblioteca está vazia. Crie o primeiro livro para começar.</p>
+            <button class="btn btn-primary btn-sm" id="empty-create-btn" type="button">Criar livro</button>
           </div>
         </section>
       </main>
     </div>
 
-    <!-- Backup Modal -->
-    <div class="modal-backdrop is-hidden" id="backup-modal" role="dialog" aria-modal="true" aria-label="Backup do workspace">
+    <div class="modal-backdrop is-hidden" id="backup-modal" role="dialog" aria-modal="true" aria-labelledby="backup-modal-title">
       <div class="modal-card">
         <div class="modal-head">
-          <h3>Backup do workspace</h3>
+          <h2 id="backup-modal-title">Backup da biblioteca</h2>
           <button class="btn btn-ghost btn-sm" id="backup-modal-close" type="button">Fechar</button>
         </div>
-        <p class="hint">Exporte ou restaure livros, presets, personagens e páginas em .zip (sem credenciais).</p>
-        <div style="display: flex; flex-direction: column; gap: 10px;">
+        <p class="hint">Exporte ou restaure livros, presets, personagens e páginas em arquivo .zip. Credenciais não são incluídas.</p>
+        <div class="stack-xs">
           <a class="btn btn-outline btn-block btn-sm" href="/api/export">Exportar tudo (.zip)</a>
           <button class="btn btn-accent btn-block btn-sm is-hidden" id="modal-export-selected-btn" type="button">Exportar selecionados (0)</button>
         </div>
-        <div style="border-top: 1px solid var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 10px;">
+        <div class="modal-divider stack-xs">
           <label class="field-label">
             <span>Restaurar arquivo de backup (.zip)</span>
-            <input id="import-file" class="field" style="padding: 7px 10px; font-size: 0.84rem;" type="file" accept=".zip,application/zip" />
+            <input id="import-file" class="field field-file" type="file" accept=".zip,application/zip" />
           </label>
           <button class="btn btn-primary btn-block btn-sm" id="import-btn" type="button">Importar backup</button>
-          <p class="error-msg is-hidden" id="backup-error" style="margin: 0;"></p>
+          <p class="error-msg is-hidden" id="backup-error" role="alert"></p>
         </div>
       </div>
     </div>
 
-    <!-- ChatGPT Plus Auth Modal -->
-    <div class="modal-backdrop is-hidden" id="auth-modal" role="dialog" aria-modal="true" aria-label="Conta ChatGPT Plus">
+    <div class="modal-backdrop is-hidden" id="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
       <div class="modal-card">
         <div class="modal-head">
-          <h3>Conta ChatGPT Plus / Codex</h3>
+          <h2 id="auth-modal-title">Conta ChatGPT Plus / Codex</h2>
           <button class="btn btn-ghost btn-sm" id="auth-modal-close" type="button">Fechar</button>
         </div>
-        <p class="hint">Autenticação local via device code para gerar roteiros, Character Sheets e páginas no provedor <code>codex</code>.</p>
+        <p class="hint">Autentique localmente por código de dispositivo para gerar roteiros, folhas de referência e páginas pelo provedor <code>codex</code>.</p>
         <div class="auth-code-box is-hidden" id="codex-code">
-          <p style="margin: 0; font-size: 0.85rem;">
+          <p class="auth-code-hint">
             Abra <a id="codex-link" href="https://auth.openai.com/codex/device" target="_blank" rel="noopener">auth.openai.com/codex/device</a> e digite o código:
           </p>
           <code id="codex-user-code"></code>
         </div>
-        <p class="error-msg is-hidden" id="codex-error"></p>
+        <p class="error-msg is-hidden" id="codex-error" role="alert"></p>
         <button class="btn btn-primary btn-block" id="codex-connect" type="button">Conectar ChatGPT</button>
         <button class="btn btn-outline btn-block is-hidden" id="codex-logout" type="button">Desconectar conta</button>
       </div>
@@ -160,10 +313,10 @@
 
     <div class="busy-overlay is-hidden" id="busy-overlay" role="status" aria-live="polite">
       <div class="busy-card">
-        <div class="spinner"></div>
-        <h3 id="busy-title" style="margin: 0;">Importando backup…</h3>
+        <div class="spinner" aria-hidden="true"></div>
+        <h2 id="busy-title" class="busy-title">Importando backup…</h2>
         <div class="busy-bar"><div class="busy-fill" id="busy-fill"></div></div>
-        <p class="busy-sub" id="busy-sub">Não feche esta página.</p>
+        <p class="busy-sub" id="busy-sub">Aguarde a conclusão sem fechar esta aba.</p>
       </div>
     </div>
 

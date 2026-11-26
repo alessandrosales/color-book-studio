@@ -3,6 +3,19 @@
  * Shared by the library (new book drawer) and the studio (stage 1).
  */
 
+const PAGE_SIZE_LABEL = {
+  "square_8.5x8.5": "Quadrado 8.5x8.5",
+  "letter_8.5x11": "Carta 8.5x11",
+  "6x9": "6x9 in",
+  "square_8x8": "Quadrado 8x8",
+  "8x10": "8x10 in",
+  a4: "A4",
+};
+
+export function formatPageSize(code) {
+  return PAGE_SIZE_LABEL[code] || String(code || "letter_8.5x11").replace("_", " ");
+}
+
 const activeByRoot = new WeakMap();
 
 function buildCategories(presets, categories) {
@@ -85,8 +98,10 @@ export function renderStylePicker({ root, presets, categories = [], selectedId, 
     card.querySelector(".preset-name").textContent = preset.name;
     card.querySelector(".preset-badge").textContent = preset.badge || preset.category;
     card.querySelector(".preset-tagline").textContent = preset.tagline || preset.description;
+    const thresholdLabels = { otsu: "Otsu", adaptive: "Adaptativo", fixed: "Limiar fixo" };
+    const thresh = thresholdLabels[preset.processing?.threshold] || "Adaptativo";
     card.querySelector(".preset-meta span").textContent =
-      `${preset.page_size.replace("_", " ")} · ${preset.processing?.threshold || "adaptive"}`;
+      `${formatPageSize(preset.page_size)}, ${thresh}`;
     card.addEventListener("click", () => {
       activeByRoot.set(root, preset.category);
       onSelect(preset);
