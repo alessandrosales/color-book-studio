@@ -18,8 +18,7 @@ cp .env.example .env          # preencha a chave do provedor
 ## Interface web
 
 ```bash
-uv sync --extra web --extra openai   # extra web uma vez
-uv run cbg web                       # http://127.0.0.1:8000
+uv run cbg              # http://127.0.0.1:8000 (ou --port 8080 --reload)
 ```
 
 A raiz (`/`) é a **biblioteca de livros**: cada livro guarda contexto, páginas,
@@ -85,14 +84,6 @@ O provider `codex` reutiliza o login por device code do Codex (mesma implementa�
 do projeto `videoai`): autentica no ChatGPT Plus e gera as imagens pela ferramenta
 `image_generation`, sem chave de API por imagem.
 
-```bash
-uv run cbg auth codex     # abre o navegador e mostra um código
-uv run cbg auth status    # conectado | desconectado
-uv run cbg auth logout
-
-uv run cbg generate --provider codex --pages 5
-```
-
 Na interface web há o bloco **Conta ChatGPT**: clique em *Conectar ChatGPT*, abra
 a página exibida, informe o código e aguarde. Quando conectado e sem
 `OPENAI_API_KEY`, o app troca o provedor para `codex` automaticamente (inclusive
@@ -102,51 +93,34 @@ mesmo enviado em cada geração.
 - Credenciais ficam em `~/.config/color-book-generator/openai_codex_auth.json`
   (modo `0600`), com refresh automático do token.
 - Para reaproveitar um login já existente: `export CBG_CODEX_AUTH=/caminho/para/openai_codex_auth.json`.
-- `cbg auth models` lista os slugs disponíveis na sua conta; o app consulta
-  `/backend-api/codex/models`, escolhe o modelo de maior prioridade do seu plano
-  e tenta os próximos modelos/parâmetros se um for recusado.
+- O app consulta `/backend-api/codex/models`, escolhe o modelo de maior prioridade
+  do seu plano e tenta os próximos modelos/parâmetros se um for recusado.
 - Modelos ajustáveis: `CBG_CODEX_MODEL` (força um slug), `CBG_CODEX_IMAGE_MODEL`
   (ferramenta de imagem, padrão `gpt-image-2`), `CBG_CODEX_IMAGE_QUALITY`
   (padrão `medium`) e `CBG_CODEX_CLIENT_VERSION` (força a versão do catálogo).
 - Se o backend recusar o tamanho pedido, a geração repete automaticamente em
   `1024x1024`/`medium`; erros do ChatGPT trazem o corpo da resposta na mensagem.
 
-## Uso (CLI)
-
-```bash
-uv run cbg init               # cria config/book.yaml (se ainda não existir)
-uv run cbg show               # mostra geometria da página (trim, bleed, px)
-uv run cbg providers          # lista provedores disponíveis
-
-uv run cbg generate --dry-run # só gera os prompts, sem custo
-uv run cbg generate           # gera páginas + book.pdf em output/<run>/
-uv run cbg generate --resume  # retoma um run interrompido
-uv run cbg compose output/<run>/pages -o book.pdf
-uv run cbg web --port 8000     # interface web
-```
-
 ## Estrutura
 
 ```
-config/book.yaml                      # definição do livro
+config/book.yaml                      # padrões do livro
 src/color_book_generator/
   config.py                           # modelos de config + geometria de página
   prompts.py                          # construção dos prompts
-  pipeline.py                         # orquestração ponta a ponta
+  fsutil.py                           # gravação atômica em disco
   auth/codex.py                       # device-code OAuth ChatGPT Plus/Codex
   providers/                          # codex | openai | gemini | replicate | local
   processing/line_art.py              # binarização, limpeza, enquadramento
   layout/pdf.py                       # montagem do PDF (reportlab)
-  web/                                # FastAPI + UI (prompts por página)
-output/<run>/{raw,pages,book.pdf,manifest.json}
+  web/                                # FastAPI + UI + persistência
 output/web/<session>/{pages,raw,previews,book.pdf,session.json}
 output/web/{settings.json,characters/,style/}
 ```
 
 ## Como o pipeline funciona
 
-1. `prompts.py` monta um prompt por página a partir do `theme` (ou de um arquivo
-   com `--subjects`, um assunto por linha).
+1. `prompts.py` e `story.py` montam os prompts de cada página.
 2. O provedor gera a imagem; com `candidates > 1` a página com melhor
    legibilidade (cobertura de tinta) é escolhida.
 3. `processing/line_art.py` converte para P&B puro: cinza → limpeza → threshold

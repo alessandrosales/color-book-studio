@@ -1,4 +1,4 @@
-from color_book_generator.cli import app
+from color_book_generator.web.server import main
 
 if __name__ == "__main__":
-    app()
+    main()
