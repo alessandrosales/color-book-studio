@@ -1,0 +1,68 @@
+[project]
+name = "color-book-generator"
+version = "0.1.0"
+description = "Pipeline for generating print-ready line-art coloring books"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Alessandro Sales" }]
+
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.7",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+  "pyyaml>=6.0",
+  "pillow>=10.3",
+  "numpy>=1.26",
+  "opencv-python-headless>=4.9",
+  "reportlab>=4.1",
+  "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.111", "uvicorn>=0.30", "python-multipart>=0.0.9"]
+openai = ["openai>=1.30"]
+gemini = ["google-genai>=0.3"]
+replicate = ["replicate>=0.25"]
+local = ["torch>=2.2", "diffusers>=0.27", "transformers>=4.40", "accelerate>=0.30"]
+dev = [
+  "pytest>=8.2",
+  "pytest-cov>=5.0",
+  "ruff>=0.4",
+  "mypy>=1.10",
+  "pypdf>=4.2",
+  "fastapi>=0.111",
+  "uvicorn>=0.30",
+  "httpx>=0.27",
+  "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+cbg = "color_book_generator.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/color_book_generator"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501", "B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src"]
+strict = true
+ignore_missing_imports = true

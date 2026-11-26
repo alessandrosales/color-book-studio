@@ -1,0 +1,54 @@
+# Coloring book definition. Edit and run: cbg generate
+title: "Meu Livro de Colorir"
+subtitle: ""
+author: "Seu Nome"
+language: pt-BR
+
+# Print preset: letter_8.5x11 | a4 | square_8x8 | 6x9 | 8x10
+page_size: letter_8.5x11
+# Margins in inches (inside margin should be larger for binding)
+margin_inner_in: 0.75
+margin_outer_in: 0.5
+margin_top_in: 0.5
+margin_bottom_in: 0.5
+# Bleed added around the trim size (0.125 is standard for KDP)
+bleed_in: 0.125
+dpi: 300
+
+# What the book is about
+theme: "animais fofos da floresta"
+audience: "criancas de 4 a 8 anos"
+style: "line art simples e limpo, contornos grossos, areas grandes para colorir"
+# Extra guidance appended to every page prompt
+prompt_suffix: "fundo branco, sem sombreamento, sem texto, sem cores, apenas linhas pretas"
+negative_prompt: "cor, gradiente, sombreamento, cinza, texto, marca d'agua, ruido"
+
+# Number of illustration pages
+pages: 24
+
+# Generation backend: codex | openai | gemini | replicate | local
+provider: openai
+model: gpt-image-1
+# Images generated per prompt attempt (best one is kept after processing)
+candidates: 1
+seed:
+
+# Post-processing of the generated art into printable line art
+processing:
+  threshold: adaptive        # adaptive | otsu | fixed
+  fixed_threshold: 160
+  denoise: true
+  min_component_px: 24
+  crop_to_content: true
+  target_inner_margin_ratio: 0.06
+  max_upscale: 2.0
+
+# Caption / speech bubble baked into every page (text comes from the page field)
+caption:
+  enabled: false
+  style: balloon        # balloon | caption
+  position: bottom      # bottom | top
+  font_family: sans     # sans | serif | mono
+  bold: false
+  font_size_ratio: 0.032
+  band_ratio: 0.16

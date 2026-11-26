@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Color Book Studio</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2317171a'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%23f6f4ef' stroke-width='2'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6">
+            <rect x="3" y="3" width="18" height="18" rx="3" />
+            <path d="M3 9h18M9 3v18" opacity=".45" />
+            <circle cx="15" cy="15" r="3.2" />
+          </svg>
+        </span>
+        <span class="brand-name">Color Book Studio</span>
+      </div>
+      <div class="meta" id="meta"></div>
+      <div class="topbar-actions">
+        <button class="btn btn-ghost" id="compose-btn" disabled>Gerar PDF</button>
+        <a class="btn btn-primary is-hidden" id="pdf-link" href="#" target="_blank" rel="noopener">Abrir PDF</a>
+      </div>
+    </header>
+
+    <div class="server-banner is-hidden" id="server-banner">
+      Servidor desatualizado: reinicie <code>uv run cbg web</code> para carregar as últimas mudanças.
+    </div>
+
+    <main class="layout">
+      <aside class="panel">
+        <div class="panel-block">
+          <h2>Padrões da página</h2>
+          <p class="hint">
+            Prompt de contexto aplicado a todas as imagens. Descreva estilo, traço,
+            fundo e composição.
+          </p>
+          <textarea id="context" class="field field-context" rows="9" spellcheck="false"></textarea>
+          <div class="panel-row">
+            <label class="mini-field">
+              <span>Provedor</span>
+              <select id="provider" class="field"></select>
+            </label>
+            <label class="mini-field">
+              <span>Modelo</span>
+              <input id="model" class="field" type="text" spellcheck="false" list="model-options" autocomplete="off" />
+              <datalist id="model-options"></datalist>
+            </label>
+          </div>
+          <div class="panel-row">
+            <label class="mini-field grow">
+              <span>Título</span>
+              <input id="session-title" class="field" type="text" spellcheck="false" />
+            </label>
+            <label class="mini-field">
+              <span>Páginas</span>
+              <input id="pages-count" class="field" type="number" min="1" max="200" value="12" />
+            </label>
+          </div>
+          <label class="check-field">
+            <input type="checkbox" id="caption-enabled" />
+            <span>Legenda / balão nas páginas</span>
+          </label>
+          <div class="caption-options" id="caption-options">
+            <div class="panel-row">
+              <label class="mini-field">
+                <span>Estilo</span>
+                <select id="caption-style" class="field">
+                  <option value="balloon">Balão de fala</option>
+                  <option value="caption">Legenda</option>
+                </select>
+              </label>
+              <label class="mini-field">
+                <span>Posição</span>
+                <select id="caption-position" class="field">
+                  <option value="bottom">Base</option>
+                  <option value="top">Topo</option>
+                </select>
+              </label>
+            </div>
+            <div class="panel-row">
+              <label class="mini-field">
+                <span>Fonte</span>
+                <select id="caption-font" class="field">
+                  <option value="sans">Sans</option>
+                  <option value="serif">Serif</option>
+                  <option value="mono">Mono</option>
+                </select>
+              </label>
+              <label class="mini-field">
+                <span>Peso</span>
+                <select id="caption-weight" class="field">
+                  <option value="normal">Normal</option>
+                  <option value="bold">Negrito</option>
+                </select>
+              </label>
+            </div>
+            <div class="panel-row">
+              <label class="mini-field grow">
+                <span>Tamanho</span>
+                <select id="caption-size" class="field">
+                  <option value="0.024">Pequeno</option>
+                  <option value="0.032">Médio</option>
+                  <option value="0.04">Grande</option>
+                  <option value="0.048">Extra</option>
+                </select>
+              </label>
+            </div>
+          </div>
+          <div class="panel-actions">
+            <button class="btn btn-outline" id="save-context">Salvar padrões</button>
+            <button class="btn btn-ghost" id="new-session">Nova sessão</button>
+          </div>
+          <p class="hint panel-footnote">Nova sessão recomeça a lista usando estes padrões.</p>
+          <p class="saved" id="saved-note"></p>
+        </div>
+
+        <div class="panel-block">
+          <h2>Personagens</h2>
+          <p class="hint">
+            Envie imagens de referência (nome + foto) para manter o mesmo
+            personagem fiel em todas as páginas.
+          </p>
+          <ul class="character-list" id="character-list"></ul>
+          <p class="char-empty" id="char-empty">Nenhum personagem ainda.</p>
+          <div class="char-form">
+            <input id="character-name" class="field" type="text" placeholder="Nome do personagem" />
+            <input id="character-file" class="field" type="file" accept="image/*" />
+            <button class="btn btn-outline btn-block" id="character-add">Adicionar personagem</button>
+          </div>
+          <p class="error-msg is-hidden" id="character-error"></p>
+        </div>
+
+        <div class="panel-block">
+          <h2>Estilo (referência)</h2>
+          <p class="hint">
+            Use uma imagem/página como fonte visual: traço, nível de detalhe e
+            composição serão repetidos em todas as gerações.
+          </p>
+          <div class="style-preview" id="style-preview">
+            <span>Nenhum estilo definido.</span>
+          </div>
+          <input id="style-file" class="field" type="file" accept="image/*" />
+          <div class="panel-actions">
+            <button class="btn btn-outline" id="style-upload">Definir estilo</button>
+            <button class="btn btn-ghost" id="style-remove">Remover</button>
+          </div>
+          <p class="error-msg is-hidden" id="style-error"></p>
+        </div>
+
+        <div class="panel-block">
+          <div class="auth-head">
+            <h2>Conta ChatGPT</h2>
+            <span class="status" id="codex-status" data-kind="pending">verificando</span>
+          </div>
+          <p class="hint">
+            Use seu plano Plus/Codex como provedor de imagens (provider
+            <code>codex</code>).
+          </p>
+          <div class="auth-code is-hidden" id="codex-code">
+            <p>
+              Abra
+              <a id="codex-link" href="https://auth.openai.com/codex/device" target="_blank" rel="noopener">auth.openai.com/codex/device</a>
+              e informe o código:
+            </p>
+            <code id="codex-user-code"></code>
+          </div>
+          <p class="error-msg is-hidden" id="codex-error"></p>
+          <button class="btn btn-outline btn-block" id="codex-connect">Conectar ChatGPT</button>
+          <button class="btn btn-ghost btn-block is-hidden" id="codex-logout">Desconectar</button>
+        </div>
+
+        <div class="panel-block">
+          <h2>Backup</h2>
+          <p class="hint">
+            Exporta e importa tudo: sessões, páginas geradas, personagens, estilo e
+            padrões. Credenciais de login não entram no arquivo.
+          </p>
+          <a class="btn btn-outline btn-block" id="export-btn" href="/api/export">Exportar tudo (.zip)</a>
+          <input id="import-file" class="field" type="file" accept=".zip,application/zip" />
+          <button class="btn btn-outline btn-block" id="import-btn">Importar backup</button>
+          <p class="error-msg is-hidden" id="backup-error"></p>
+        </div>
+
+        <div class="panel-block panel-note">
+          <h2>Como funciona</h2>
+          <ol class="steps">
+            <li>Defina os padrões e ajuste o título de cada página.</li>
+            <li>Gere as imagens uma a uma (ou todas as pendentes).</li>
+            <li>Revise a lista e gere o PDF pronto para impressão.</li>
+          </ol>
+        </div>
+      </aside>
+
+      <section class="pages-section">
+        <div class="section-head">
+          <div>
+            <h2>Páginas</h2>
+            <p class="hint" id="pages-subtitle">Carregando…</p>
+          </div>
+          <div class="section-actions">
+            <span class="progress-pill" id="progress-pill">0 / 0</span>
+            <button class="btn btn-outline" id="generate-pending">Gerar pendentes</button>
+          </div>
+        </div>
+        <ul class="page-list" id="page-list"></ul>
+        <div class="empty-state is-hidden" id="empty-state">
+          <p>Crie uma sessão para começar.</p>
+        </div>
+      </section>
+    </main>
+
+    <div class="lightbox is-hidden" id="lightbox" role="dialog" aria-modal="true" aria-label="Visualizar página">
+      <button class="lightbox-close" id="lightbox-close" aria-label="Fechar">×</button>
+      <button class="lightbox-nav prev" id="lightbox-prev" aria-label="Página anterior">‹</button>
+      <img id="lightbox-img" alt="" />
+      <button class="lightbox-nav next" id="lightbox-next" aria-label="Próxima página">›</button>
+      <div class="lightbox-caption" id="lightbox-caption"></div>
+    </div>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
