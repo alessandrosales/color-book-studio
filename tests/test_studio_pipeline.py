@@ -1053,3 +1053,26 @@ def test_autopilot_finishing_failure_still_composes_pdf(
     book = client.get(f"/api/sessions/{sid}").json()
     assert book["pdf_ready"] is True
     assert book["cover_preview_url"]  # the cover still got painted
+
+
+def test_cover_prompt_letters_the_exact_title_in_the_art() -> None:
+    from color_book_generator.web.routers import studio as studio_mod
+
+    sid = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()["id"]
+    state = store.load_session(sid)
+    assert state is not None
+    state.author = "Alessandro e Lucas"
+    prompt = studio_mod._compose_cover_prompt(state, "Lumi Learns to Fly", "", True)
+    assert '"Lumi Learns to Fly"' in prompt
+    assert "spelled correctly" in prompt
+    assert '"Alessandro e Lucas"' in prompt
+    assert "Do not render the title" not in prompt
+
+    negative = studio_mod._cover_negative_prompt(
+        "color, speech bubble, japanese text, text, watermark, messy sketch", False
+    )
+    assert "japanese text" not in negative and "speech bubble" not in negative
+    assert ", text," not in f", {negative},"
+    assert "watermark" in negative and "misspelled title" in negative

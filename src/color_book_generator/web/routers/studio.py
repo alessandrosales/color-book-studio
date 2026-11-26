@@ -27,7 +27,6 @@ from color_book_generator.layout.pdf import compose_pdf
 from color_book_generator.page_layout import plan_page_layout
 from color_book_generator.presets import default_page_layout_for_category, get_preset
 from color_book_generator.processing.caption import (
-    draw_cover_title,
     render_text_page,
 )
 from color_book_generator.processing.line_art import (
@@ -464,6 +463,47 @@ def _cover_story_memory(state: SessionState) -> str:
     return "\n".join(lines)
 
 
+def _cover_lettering(state: SessionState, title: str) -> str:
+    """Ask the image model to letter the title as part of the artwork, in the book's mood."""
+    clean = (title.strip() or state.title).replace('"', "'")
+    author = state.author.strip().replace('"', "'")
+    lines = [
+        "TITLE LETTERING (part of the artwork, not a caption): letter the book title "
+        f'exactly as "{clean}", with every word and letter spelled correctly and '
+        "nothing added or left out.",
+        "Design the lettering like a bestselling picture-book cover: large, playful and "
+        "easy to read, with hand-crafted typography that belongs to this story (shapes, "
+        "textures or small motifs taken from its world). Place it wherever it best suits "
+        "the composition, usually across the top, and compose the scene around it so it "
+        "never covers the character's face or key action. No banner or plain band behind "
+        "it unless it is part of the illustration.",
+    ]
+    if author:
+        lines.append(f'Add the author line "{author}" in small, simple letters.')
+    lines.append(
+        "Render no other text: no subtitle, slogan, page numbers, publisher name, "
+        "barcode or watermark."
+    )
+    return " ".join(lines)
+
+
+_TEXT_BANS = re.compile(r"^(?:\w+ )?(?:text|lettering|letters|typography)$|speech bubbles?")
+
+
+def _cover_negative_prompt(book_negative: str, color: bool) -> str:
+    """The cover carries its own title, so drop the book's 'no text' bans."""
+    base = (
+        "watermark, signature, blurry, low quality, distorted proportions"
+        if color
+        else ", ".join(
+            term
+            for term in (t.strip() for t in book_negative.split(","))
+            if term and not _TEXT_BANS.search(term.lower())
+        )
+    )
+    return f"misspelled title, garbled letters, extra text, {base}".rstrip(", ")
+
+
 def _compose_cover_prompt(
     state: SessionState, title: str, direction: str, color: bool
 ) -> str:
@@ -480,25 +520,24 @@ def _compose_cover_prompt(
             direction.strip()
             or "Design a captivating, friendly cover that represents the whole story."
         ),
-        f"BOOK TITLE: {title.strip() or state.title}",
         "STORY MEMORY (use only as conceptual reference, do not render body text):\n"
         + memory
         if memory
         else "",
         f"MAIN CHARACTERS: {characters}" if characters else "",
         (
-            "COVER OVERRIDE: ignore any black-and-white or line-art-only instruction "
-            "from the book context for this cover. Create one single full-page cover "
-            "illustration in FULL COLOR, with a cohesive and inviting palette suitable "
-            "for children. Keep the drawing style and characters consistent with the "
-            "book. Leave the bottom area visually calm so a title band can sit there. "
-            "Do not render the title or any text; the title will be added separately."
+            "COVER OVERRIDE: ignore any black-and-white, line-art-only or 'no text' "
+            "instruction from the book context for this cover. Create one single "
+            "full-bleed cover illustration in FULL COLOR, with a cohesive and inviting "
+            "palette suitable for children. Keep the drawing style and characters "
+            "consistent with the book."
             if color
-            else "Create one single full-page coloring-book cover illustration in "
-            "clean black-and-white line art. Leave the bottom area visually calm so a "
-            "title band can sit there. Do not render the title or any text; the title "
-            "will be added separately. No watermark."
+            else "COVER OVERRIDE: ignore any 'no text' instruction from the book context "
+            "for this cover. Create one single full-page coloring-book cover in clean "
+            "black-and-white line art, with the title drawn as outlined letters that "
+            "can be colored in."
         ),
+        _cover_lettering(state, title),
     ]
     return "\n\n".join(part for part in parts if part)
 
@@ -537,14 +576,8 @@ async def _render_cover(
     state.cover_prompt = direction.strip()
     state.cover_color = color
     prompt = _compose_cover_prompt(state, title, direction, color)
-    negative = (
-        "text, title lettering, watermark, signature, blurry, low quality, "
-        "distorted proportions"
-        if color
-        else (state.negative_prompt or cfg.negative_prompt)
-    )
+    negative = _cover_negative_prompt(state.negative_prompt or cfg.negative_prompt, color)
     processing = state.processing or cfg.processing
-    caption = _session_caption_cfg(state)
     style_bytes = store.effective_style_reference_bytes(
         sid, state.category, 1, preset_id=state.preset_id
     )
@@ -564,7 +597,7 @@ async def _render_cover(
             canvas = fit_color_to_page(img, cfg.image_px)
         else:
             canvas = prepare_page(img, cfg.image_px, processing)
-        return draw_cover_title(canvas, title, caption)
+        return canvas
 
     state.cover_status = "generating"
     state.cover_error = None
@@ -2118,6 +2151,8 @@ def _run_autopilot_thread(sid: str, req: AutopilotRequest) -> None:
         asyncio.run(_run_autopilot(sid, req))
     finally:
         _autopilot_threads.pop(sid, None)
+
+
 
 
 @router.post("/autopilot", response_model=AutopilotStatus, status_code=202)

@@ -358,36 +358,3 @@ def render_text_page(
         _text(draw, (x, y), line, body_font, body_size, cfg.bold)
         y += body_line_h
     return canvas
-
-
-def draw_cover_title(
-    canvas: Image.Image, title: str, cfg: CaptionConfig
-) -> Image.Image:
-    """Draw the book title on a white band at the bottom of the cover."""
-    clean = title.strip()
-    if not clean:
-        return canvas
-    width, height = canvas.size
-    band_h = round(height * 0.15)
-    band_y0 = height - band_h
-    draw = ImageDraw.Draw(canvas)
-    fill = 255 if canvas.mode == "L" else (255, 255, 255)
-    draw.rectangle((0, band_y0, width, height), fill=fill)
-    draw.line((0, band_y0, width, band_y0), fill=0, width=max(2, round(width * 0.003)))
-
-    size = max(18, round(width * cfg.font_size_ratio * 1.9))
-    max_w = round(width * 0.86)
-    font = _font(size, cfg.font_family)
-    lines = _wrap(draw, clean, font, max_w)
-    line_h = round(size * 1.16)
-    while lines and line_h * len(lines) > band_h * 0.78 and size > 12:
-        size -= 2
-        font = _font(size, cfg.font_family)
-        lines = _wrap(draw, clean, font, max_w)
-        line_h = round(size * 1.16)
-    y = band_y0 + (band_h - line_h * len(lines)) / 2
-    for line in lines:
-        line_w = draw.textlength(line, font=font)
-        _text(draw, ((width - line_w) / 2, y), line, font, size, True)
-        y += line_h
-    return canvas
