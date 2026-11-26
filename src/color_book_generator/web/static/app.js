@@ -2,6 +2,7 @@ import { syncAllPopoverSelects } from "/static/popover-select.js";
 import { formatPageSize, renderStylePicker } from "/static/style-picker.js";
 import { animateLightboxOpen, animateModalOpen, animateStageEnter } from "/static/motion.js";
 import { fetchFontPresetFile, renderFontPresetPicker } from "/static/font-presets.js";
+import { initBriefing, syncBriefing } from "/static/briefing.js";
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -44,6 +45,8 @@ const state = {
   lightboxIndex: -1,
   autopilotTimer: null,
   lastAutopilotPhase: "",
+  reading: null,
+  printProfiles: [],
 };
 
 async function api(path, options = {}) {
@@ -88,8 +91,9 @@ function sessionIdFromUrl() {
 
 /* ==================== STEPPER & GSAP TRANSITIONS ==================== */
 function setStep(step, { animate = true, persist = true } = {}) {
-  const raw = Number(step) || 1;
-  const next = Math.max(1, Math.min(4, raw >= 5 ? 4 : raw));
+  // Step 0 is the briefing; the backend's legacy step 5 maps onto step 4.
+  const raw = Number(step);
+  const next = Number.isFinite(raw) ? Math.max(0, Math.min(4, raw)) : 1;
   state.currentStep = next;
 
   $$(".step-tab").forEach((tab) => {
@@ -102,7 +106,7 @@ function setStep(step, { animate = true, persist = true } = {}) {
     }
   });
 
-  for (let i = 1; i <= 4; i++) {
+  for (let i = 0; i <= 4; i++) {
     const panel = $(`#stage-${i}`);
     if (!panel) continue;
     const isTarget = i === next;
@@ -518,13 +522,14 @@ function renderStage3StoryAndPages() {
             <span class="pill ${statusClass}">${STATUS_LABEL[busy ? "generating" : page.status] || page.status}</span>
           </div>
         </div>
+        <p class="page-beat hint hint-sm is-hidden"></p>
         <div class="field-row">
           <label class="field-label">
             <span>Título da cena</span>
             <input class="field page-title-input" type="text" placeholder="Página ${page.index}" />
           </label>
           <label class="field-label">
-            <span>Texto ou legenda</span>
+            <span class="page-caption-label">Texto ou legenda <em class="page-word-count"></em></span>
             <input class="field page-caption-input" type="text" placeholder="Fala ou legenda desta página (opcional)" />
           </label>
         </div>
@@ -564,6 +569,12 @@ function renderStage3StoryAndPages() {
     capEl.value = page.caption_text || "";
     promptEl.value = page.prompt || "";
     if (page.error) li.querySelector(".error-msg").textContent = page.error;
+    const beatEl = li.querySelector(".page-beat");
+    if (page.beat) {
+      beatEl.textContent = `Batida: ${page.beat}`;
+      beatEl.classList.remove("is-hidden");
+    }
+    updateWordCount(li);
 
     const thumbImg = li.querySelector(".page-thumb img");
     if (thumbImg) {
@@ -591,6 +602,7 @@ function renderStage3StoryAndPages() {
         page.prompt = promptEl.value;
         page.caption_text = capEl.value;
         sceneTitleEl.textContent = titleEl.value.trim() || `Página ${page.index}`;
+        refreshReading();
       } catch (err) {
         toast(err.message, true);
       }
@@ -600,7 +612,10 @@ function renderStage3StoryAndPages() {
       saveEdits();
     });
     promptEl.addEventListener("input", saveEdits);
-    capEl.addEventListener("input", saveEdits);
+    capEl.addEventListener("input", () => {
+      updateWordCount(li);
+      saveEdits();
+    });
 
     li.querySelector(".page-gen-btn").addEventListener("click", () =>
       generateOnePage(page.index, promptEl.value, capEl.value, page.character_ids)
@@ -923,6 +938,7 @@ function renderStage5Finalize() {
   $("#story-synopsis").value = s.story_synopsis || "";
 
   $("#kdp-blank-verso").checked = Boolean(s.blank_verso);
+  renderPrintProfile();
   $("#kdp-title-page").checked = Boolean(s.include_title_page);
   $("#kdp-belongs-to").checked = Boolean(s.include_belongs_to_page);
   $("#kdp-color-test").checked = Boolean(s.include_color_test_page);
@@ -957,6 +973,77 @@ function renderPublisherLogo(s) {
 }
 
 
+/* ==================== PRINT PROFILE ==================== */
+function renderPrintProfile() {
+  const select = $("#print-profile");
+  const s = state.session;
+  if (!select || !s || !state.printProfiles?.length) return;
+  if (select.options.length !== state.printProfiles.length) {
+    select.replaceChildren(
+      ...state.printProfiles.map((p) => {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = p.name;
+        return opt;
+      }),
+    );
+  }
+  select.value = s.print_profile || "kdp_paperback";
+  const profile = state.printProfiles.find((p) => p.id === select.value);
+  const sizeNote =
+    profile?.supported_sizes?.length && !profile.supported_sizes.includes(s.page_size)
+      ? " O formato atual não é padrão deste perfil."
+      : "";
+  $("#print-profile-hint").textContent = profile ? `${profile.description}${sizeNote}` : "";
+}
+
+/* ==================== READING STANDARDS ==================== */
+function countWords(text) {
+  return text.replace(/\|/g, " ").split(/\s+/).filter(Boolean).length;
+}
+
+function updateWordCount(li) {
+  const counter = li.querySelector(".page-word-count");
+  const input = li.querySelector(".page-caption-input");
+  if (!counter || !input) return;
+  const words = countWords(input.value);
+  const cap = state.reading?.word_cap;
+  counter.textContent = words ? (cap ? `${words}/${cap} palavras` : `${words} palavras`) : "";
+  counter.classList.toggle("is-over", Boolean(cap && words > cap));
+}
+
+function renderReadingPanel() {
+  const r = state.reading;
+  const summary = $("#reading-summary");
+  const issues = $("#reading-issues");
+  const applyBtn = $("#reading-apply-font");
+  if (!summary || !r) return;
+  const audience = `${r.age_label}${r.age_assumed ? " (padrão da categoria; defina no briefing)" : ""}`;
+  const font = r.caption_enabled
+    ? ` Fonte: ${r.nominal_pt} pt (mínimo ${r.font_min_pt} pt, ideal ${r.font_target_pt} pt).`
+    : " Legendas desligadas.";
+  summary.textContent = `Público: ${audience}. Até ${r.word_cap} palavras por legenda.${font}`;
+  issues.replaceChildren(
+    ...r.warnings.map((msg) => {
+      const item = document.createElement("li");
+      item.textContent = msg;
+      return item;
+    }),
+  );
+  applyBtn.classList.toggle("is-hidden", !r.caption_enabled || r.font_ok);
+  $$("#page-list .page-card").forEach(updateWordCount);
+}
+
+const refreshReading = debounce(async () => {
+  if (!state.sid) return;
+  try {
+    state.reading = await api(`/api/sessions/${state.sid}/reading`);
+    renderReadingPanel();
+  } catch (_) {
+    // The reading check is advisory; keep the editor usable if it fails.
+  }
+}, 300);
+
 function renderAll() {
   renderHeaderAndStepper();
   renderPresets();
@@ -964,6 +1051,7 @@ function renderAll() {
   renderStage2Characters();
   renderStage3StoryAndPages();
   renderStage5Finalize();
+  syncBriefing();
   syncAllPopoverSelects();
 }
 
@@ -971,6 +1059,7 @@ function renderAll() {
 async function reloadSession() {
   state.session = await api(`/api/sessions/${state.sid}`);
   renderAll();
+  refreshReading();
 }
 
 async function saveStyleConfig({ silent = false } = {}) {
@@ -1350,7 +1439,8 @@ function bindEvents() {
     try {
       const report = await api(`/api/sessions/${state.sid}/kdp-preflight`);
       const count = document.createElement("p");
-      count.textContent = `Páginas previstas: ${report.physical_pages}. Contagem KDP: ${report.kdp_pages}.`;
+      const padded = report.kdp_pages > report.physical_pages ? ` (${report.kdp_pages - report.physical_pages} em branco para fechar o múltiplo)` : "";
+      count.textContent = `${report.profile_name || "Perfil"}: ${report.kdp_pages} páginas${padded}, margem da lombada ${report.gutter_mm ?? "?"} mm.`;
       result.appendChild(count);
       for (const [label, items] of [["Pendências", report.errors], ["Revisões", report.warnings]]) {
         if (!items.length) continue;
@@ -1592,12 +1682,8 @@ function bindEvents() {
   $("#story-generate-btn").addEventListener("click", async () => {
     const errEl = $("#story-error");
     errEl.classList.add("is-hidden");
+    // An empty premise falls back to the briefing's core idea on the server.
     const premise = $("#story-premise").value.trim();
-    if (!premise) {
-      errEl.textContent = "Descreva a ideia ou tema do livro para gerar o roteiro.";
-      errEl.classList.remove("is-hidden");
-      return;
-    }
     const btn = $("#story-generate-btn");
     btn.disabled = true;
     btn.textContent = "Roteirizando páginas…";
@@ -1612,7 +1698,8 @@ function bindEvents() {
         }),
       });
       await reloadSession();
-      toast(`Roteiro criado com ${plural(res.pages_updated, "página pronta", "páginas prontas")}.`);
+      const notes = res.warnings?.length ? ` ${plural(res.warnings.length, "aviso", "avisos")} de leitura no painel.` : "";
+      toast(`Roteiro criado com ${plural(res.pages_updated, "página pronta", "páginas prontas")}.${notes}`);
     } catch (err) {
       errEl.textContent = err.message;
       errEl.classList.remove("is-hidden");
@@ -1909,7 +1996,37 @@ async function init() {
 
   bindEvents();
   renderAll();
-  setStep(session.current_step || 1, { animate: true, persist: false });
+  setStep(session.current_step ?? 1, { animate: true, persist: false });
+  initBriefing({ api, toast, reloadSession, getState: () => state }).catch(() => {});
+  refreshReading();
+  api("/api/print-profiles")
+    .then((profiles) => {
+      state.printProfiles = profiles;
+      renderPrintProfile();
+      syncAllPopoverSelects();
+    })
+    .catch(() => {});
+  $("#print-profile").addEventListener("change", async () => {
+    try {
+      await api(`/api/sessions/${state.sid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ print_profile: $("#print-profile").value }),
+      });
+      await reloadSession();
+      toast("Perfil de impressão atualizado. Gere a prévia do PDF de novo.");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+  $("#reading-apply-font").addEventListener("click", async () => {
+    try {
+      state.reading = await api(`/api/sessions/${state.sid}/reading/apply-font`, { method: "POST" });
+      await reloadSession();
+      toast("Tamanho de fonte recomendado aplicado às legendas.");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
   await Promise.all([refreshAuth(), pollAutopilot()]);
 }
 

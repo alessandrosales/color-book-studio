@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
+from PIL import Image
 from reportlab.lib.units import inch
 from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 from color_book_generator.config import BookConfig
+from color_book_generator.print_profile import (
+    IDENTITY,
+    Placement,
+    PrintProfile,
+    is_recto,
+    page_margins,
+    place_content,
+)
 
 
 def _page_dimensions_pt(cfg: BookConfig) -> tuple[float, float]:
@@ -32,25 +43,6 @@ def _draw_logo(c: canvas.Canvas, logo: Path, center_x: float, bottom_y: float, m
         reader, center_x - width / 2, bottom_y, width=width, height=height, mask="auto"
     )
     return height
-
-
-def _draw_page_image(
-    c: canvas.Canvas, image_path: Path, cfg: BookConfig, logo: Path | None = None
-) -> None:
-    """Draw one processed page so it covers exactly the PDF page (same size on every page)."""
-    page_w, page_h = _page_dimensions_pt(cfg)
-    c.drawImage(
-        ImageReader(str(image_path)),
-        0,
-        0,
-        width=page_w,
-        height=page_h,
-        preserveAspectRatio=True,
-        anchor="c",
-    )
-    if logo is not None:
-        _draw_logo(c, logo, page_w / 2, 0.75 * inch, 0.55 * inch)
-    c.showPage()
 
 
 def _wrap_pdf_lines(
@@ -202,6 +194,167 @@ def _draw_color_test_page(c: canvas.Canvas, cfg: BookConfig) -> None:
     c.showPage()
 
 
+PageKind = Literal["cover", "title", "belongs_to", "color_test", "front", "illustration", "back", "blank"]
+
+
+@dataclass(frozen=True)
+class PageOp:
+    """One physical page of the interior, in printing order."""
+
+    kind: PageKind
+    image: Path | None = None
+    logo: Path | None = None
+
+    @property
+    def fits_margins(self) -> bool:
+        # The cover is full-bleed artwork; text pages lay themselves out inside the safe area.
+        return self.image is not None and self.kind in ("front", "illustration", "back")
+
+
+@dataclass(frozen=True)
+class PageAdjustment:
+    page_number: int
+    kind: PageKind
+    image: Path
+    placement: Placement
+
+
+def plan_interior(
+    page_images: list[Path],
+    *,
+    include_title_page: bool = True,
+    blank_verso: bool = False,
+    include_belongs_to_page: bool = False,
+    include_color_test_page: bool = False,
+    cover_image: Path | None = None,
+    front_extra_images: list[Path] | None = None,
+    back_extra_images: list[Path] | None = None,
+    publisher_logo: Path | None = None,
+    profile: PrintProfile | None = None,
+    rtl: bool = False,
+) -> list[PageOp]:
+    """Every physical page in order, padded with blanks to the print profile's page multiple."""
+    ops: list[PageOp] = []
+    if cover_image is not None and cover_image.exists():
+        ops.append(PageOp("cover", cover_image))
+    if include_title_page:
+        ops.append(PageOp("title"))
+    if include_belongs_to_page:
+        ops.append(PageOp("belongs_to"))
+    if include_color_test_page:
+        ops.append(PageOp("color_test"))
+    ops.extend(PageOp("front", path) for path in front_extra_images or [])
+
+    # With single-sided printing every illustration sits on a right-hand page and
+    # its back stays blank, so start the illustrations on a recto.
+    if blank_verso and page_images and not is_recto(len(ops) + 1, rtl):
+        ops.append(PageOp("blank"))
+    for path in page_images:
+        ops.append(PageOp("illustration", path))
+        if blank_verso:
+            ops.append(PageOp("blank"))
+
+    back = back_extra_images or []
+    back_ops = [
+        PageOp("back", path, publisher_logo if position == len(back) else None)
+        for position, path in enumerate(back, start=1)
+    ]
+    if profile is not None:
+        missing = profile.padded_pages(len(ops) + len(back_ops)) - len(ops) - len(back_ops)
+        # Padding goes before the closing pages so the book still ends on them.
+        ops.extend(PageOp("blank") for _ in range(missing))
+    ops.extend(back_ops)
+    return ops
+
+
+def _image_frame_in(cfg: BookConfig, size_px: tuple[int, int]) -> tuple[float, float, float]:
+    """Frame (width, height, offset) in inches, relative to the trim, that an image covers.
+
+    Pages are rendered at ``cfg.image_px``: the trim, plus the bleed when there is one.
+    """
+    trim_w, trim_h = cfg.trim_size_in
+    bleed = cfg.bleed_in
+    if bleed > 0:
+        frame_w, frame_h = trim_w + 2 * bleed, trim_h + 2 * bleed
+        if abs(size_px[0] / size_px[1] - frame_w / frame_h) < 0.01:
+            return frame_w, frame_h, -bleed
+    return trim_w, trim_h, 0.0
+
+
+def content_bbox_in(image_path: Path, cfg: BookConfig) -> tuple[float, float, float, float] | None:
+    """Bounding box of the inked content in trim inches (top-left origin); None for a blank page."""
+    with Image.open(image_path) as img:
+        gray = img.convert("L")
+        size = gray.size
+        box = gray.point(lambda v: 255 if v < 200 else 0).getbbox()
+    if box is None:
+        return None
+    frame_w, frame_h, offset = _image_frame_in(cfg, size)
+    sx, sy = frame_w / size[0], frame_h / size[1]
+    return (
+        box[0] * sx + offset,
+        box[1] * sy + offset,
+        box[2] * sx + offset,
+        box[3] * sy + offset,
+    )
+
+
+def interior_adjustments(
+    ops: list[PageOp], cfg: BookConfig, profile: PrintProfile, *, rtl: bool = False
+) -> list[PageAdjustment]:
+    """Pages whose content had to move away from the spine or shrink to clear the margins."""
+    margins = page_margins(profile, len(ops), cfg.bleed_in > 0)
+    trim_w, trim_h = cfg.trim_size_in
+    out: list[PageAdjustment] = []
+    for number, op in enumerate(ops, start=1):
+        if not op.fits_margins or op.image is None or not op.image.exists():
+            continue
+        placement = place_content(
+            content_bbox_in(op.image, cfg), trim_w, trim_h, margins, recto=is_recto(number, rtl)
+        )
+        if placement.changed:
+            out.append(PageAdjustment(number, op.kind, op.image, placement))
+    return out
+
+
+def describe_adjustment(adj: PageAdjustment) -> str:
+    parts: list[str] = []
+    if adj.placement.scale < 0.999:
+        parts.append(f"reduzida {round((1 - adj.placement.scale) * 100)}%")
+    if abs(adj.placement.x) > 0.01 or abs(adj.placement.y) > 0.01:
+        parts.append("deslocada para dentro da área segura")
+    label = {"illustration": "ilustração", "front": "página inicial", "back": "página final"}.get(
+        adj.kind, adj.kind
+    )
+    return f"Página física {adj.page_number} ({label}): " + " e ".join(parts) + "."
+
+
+def _draw_image_page(
+    c: canvas.Canvas,
+    image_path: Path,
+    cfg: BookConfig,
+    placement: Placement = IDENTITY,
+    logo: Path | None = None,
+) -> None:
+    """Draw a processed page over its frame, moved/scaled by ``placement`` (trim inches)."""
+    page_w, _page_h = _page_dimensions_pt(cfg)
+    reader = ImageReader(str(image_path))
+    frame_w, frame_h, offset = _image_frame_in(cfg, reader.getSize())
+    bleed = cfg.bleed_in if cfg.bleed_in > 0 else 0.0
+    trim_h = cfg.trim_size_in[1]
+    scale = placement.scale
+    # Frame's top-left in trim coordinates after the placement transform.
+    left_in = placement.x + offset * scale
+    top_in = placement.y + offset * scale
+    width_in, height_in = frame_w * scale, frame_h * scale
+    x_pt = (bleed + left_in) * inch
+    y_pt = (bleed + trim_h - top_in - height_in) * inch
+    c.drawImage(reader, x_pt, y_pt, width=width_in * inch, height=height_in * inch)
+    if logo is not None:
+        _draw_logo(c, logo, page_w / 2, 0.75 * inch, 0.55 * inch)
+    c.showPage()
+
+
 def compose_pdf(
     page_images: list[Path],
     out_path: Path,
@@ -216,7 +369,15 @@ def compose_pdf(
     back_extra_images: list[Path] | None = None,
     synopsis: str = "",
     publisher_logo: Path | None = None,
+    profile: PrintProfile | None = None,
+    rtl: bool = False,
 ) -> Path:
+    """Write the interior PDF.
+
+    With a print ``profile`` the page count is padded to its multiple and every drawing is
+    kept clear of the mirrored margins (inside margin = gutter for the final page count).
+    Without one, pages are drawn edge to edge exactly as rendered.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     page_w, page_h = _page_dimensions_pt(cfg)
     c = canvas.Canvas(
@@ -229,44 +390,41 @@ def compose_pdf(
         c.setAuthor(cfg.author)
     c.setSubject("Coloring book interior")
 
-    belongs_to = (
-        cfg.include_belongs_to_page
-        if include_belongs_to_page is None
-        else include_belongs_to_page
+    ops = plan_interior(
+        page_images,
+        include_title_page=include_title_page,
+        blank_verso=blank_verso,
+        include_belongs_to_page=(
+            cfg.include_belongs_to_page if include_belongs_to_page is None else include_belongs_to_page
+        ),
+        include_color_test_page=(
+            cfg.include_color_test_page if include_color_test_page is None else include_color_test_page
+        ),
+        cover_image=cover_image,
+        front_extra_images=front_extra_images,
+        back_extra_images=back_extra_images,
+        publisher_logo=publisher_logo,
+        profile=profile,
+        rtl=rtl,
     )
-    color_test = (
-        cfg.include_color_test_page
-        if include_color_test_page is None
-        else include_color_test_page
-    )
+    placements: dict[int, Placement] = {}
+    if profile is not None:
+        placements = {
+            adj.page_number: adj.placement
+            for adj in interior_adjustments(ops, cfg, profile, rtl=rtl)
+        }
 
-    # Front matter precedes the illustrations. Every illustration gets its own
-    # blank reverse when single-sided printing is requested.
-    if cover_image is not None and cover_image.exists():
-        _draw_page_image(c, cover_image, cfg)
-    if include_title_page:
-        _draw_title_page(c, cfg, synopsis, publisher_logo)
-    if belongs_to:
-        _draw_belongs_to_page(c, cfg)
-    if color_test:
-        _draw_color_test_page(c, cfg)
-
-    for extra in front_extra_images or []:
-        _draw_page_image(c, extra, cfg)
-
-    # In a left-to-right book, odd pages are right-hand pages. Start the
-    # illustrations on a right-hand page so each following blank is its verso.
-    if blank_verso and page_images and c.getPageNumber() % 2 == 0:
-        c.showPage()
-
-    for img in page_images:
-        _draw_page_image(c, img, cfg)
-        if blank_verso:
+    for number, op in enumerate(ops, start=1):
+        if op.kind == "title":
+            _draw_title_page(c, cfg, synopsis, publisher_logo)
+        elif op.kind == "belongs_to":
+            _draw_belongs_to_page(c, cfg)
+        elif op.kind == "color_test":
+            _draw_color_test_page(c, cfg)
+        elif op.kind == "blank" or op.image is None:
             c.showPage()
-
-    back = back_extra_images or []
-    for position, extra in enumerate(back, start=1):
-        _draw_page_image(c, extra, cfg, publisher_logo if position == len(back) else None)
+        else:
+            _draw_image_page(c, op.image, cfg, placements.get(number, IDENTITY), op.logo)
 
     c.save()
     return out_path

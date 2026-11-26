@@ -16,6 +16,8 @@ from PIL import Image
 from pydantic import BaseModel, Field
 
 from color_book_generator.auth.codex import normalize_codex_model
+from color_book_generator.brief import reads_right_to_left, structure_for_category
+from color_book_generator.brief import story_context as build_story_context
 from color_book_generator.config import (
     BookConfig,
     CaptionConfig,
@@ -26,6 +28,7 @@ from color_book_generator.config import (
 from color_book_generator.layout.pdf import compose_pdf
 from color_book_generator.page_layout import plan_page_layout
 from color_book_generator.presets import default_page_layout_for_category, get_preset
+from color_book_generator.print_profile import get_profile
 from color_book_generator.processing.caption import (
     render_text_page,
 )
@@ -37,6 +40,7 @@ from color_book_generator.processing.line_art import (
 from color_book_generator.prompts import compose_page_prompt, effective_negative_prompt
 from color_book_generator.providers import get_provider
 from color_book_generator.providers.base import generate_matching
+from color_book_generator.standards import caption_word_cap, page_beats, reading_standard
 from color_book_generator.story import (
     BookFinishing,
     CharacterBrief,
@@ -52,6 +56,7 @@ from color_book_generator.story import (
 )
 from color_book_generator.typography import detect_typography
 from color_book_generator.web import store
+from color_book_generator.web.reading import build_report
 from color_book_generator.web.store import (
     BookCharacter,
     ExtraPage,
@@ -100,6 +105,43 @@ def _session(sid: str) -> SessionState:
         raise HTTPException(status_code=404, detail="session not found")
     store.migrate_referenced_characters(state)
     return state
+
+
+def _story_context(state: SessionState) -> str:
+    """Brief + story bible the author defined in the briefing step (may be empty)."""
+    return build_story_context(state.story_brief, state.story_bible, state.category)
+
+
+def _caption_cap(state: SessionState) -> int:
+    """Caption word cap for this book's audience and page layout."""
+    standard = reading_standard(state.story_brief, state.category, state.preset_id)
+    return caption_word_cap(standard, state.page_layout)
+
+
+def _page_beats(state: SessionState, pages: int) -> list[str]:
+    return page_beats(
+        structure=structure_for_category(state.category),
+        pages=pages,
+        bible=state.story_bible,
+        brief=state.story_brief,
+    )
+
+
+def _reading_warnings(state: SessionState) -> list[str]:
+    return build_report(state, _session_book_cfg(state), _session_caption_cfg(state)).warnings
+
+
+def _story_premise(state: SessionState, premise: str = "") -> str:
+    """Premise typed in the story step, falling back to the briefing's idea."""
+    for candidate in (
+        premise,
+        state.story_premise,
+        state.story_bible.logline if state.story_bible else "",
+        state.story_brief.logline,
+    ):
+        if candidate.strip():
+            return candidate.strip()
+    return ""
 
 
 def _book_character(state: SessionState, cid: str) -> BookCharacter:
@@ -456,6 +498,12 @@ def _cover_story_memory(state: SessionState) -> str:
     lines: list[str] = []
     if state.story_synopsis.strip():
         lines.append(state.story_synopsis.strip())
+    bible = state.story_bible
+    if bible is not None and bible.locked:
+        if bible.tone.strip():
+            lines.append(f"Tone: {bible.tone.strip()}")
+        for char in bible.characters:
+            lines.append(f"Character {char.name}: {char.look}")
     for page in state.pages:
         bits = [part for part in (page.title.strip(), page.caption_text.strip()) if part]
         if bits:
@@ -840,6 +888,7 @@ def _finishing_inputs(state: SessionState) -> dict[str, object]:
             for c in state.characters
         ],
         "pages": scripted,
+        "story_context": _story_context(state),
         "provider": state.provider,
         "model": state.model,
     }
@@ -1253,6 +1302,7 @@ class StoryStateView(BaseModel):
     premise: str
     synopsis: str
     pages_updated: int
+    warnings: list[str] = Field(default_factory=list)
 
 
 @router.patch("/story", response_model=StoryStateView)
@@ -1291,13 +1341,16 @@ async def generate_story(sid: str, body: StoryGenerateRequest) -> StoryStateView
     try:
         plan = await asyncio.to_thread(
             generate_story_plan,
-            premise=body.premise,
+            premise=_story_premise(state, body.premise),
             pages=target_pages,
             mode=body.mode,
             language=body.language,
             preset=preset,
             style_context=state.context_prompt,
             characters=briefs,
+            story_context=_story_context(state),
+            page_beats=_page_beats(state, target_pages),
+            caption_max_words=_caption_cap(state),
             provider=state.provider,
             model=state.model,
         )
@@ -1306,7 +1359,7 @@ async def generate_story(sid: str, body: StoryGenerateRequest) -> StoryStateView
 
     state.story_mode = body.mode
     state.language = body.language or "en"
-    state.story_premise = body.premise.strip()
+    state.story_premise = _story_premise(state, body.premise)
     state.story_synopsis = plan.synopsis
     if any(p.caption_text.strip() for p in plan.pages):
         state.caption_enabled = True
@@ -1322,6 +1375,8 @@ async def generate_story(sid: str, body: StoryGenerateRequest) -> StoryStateView
             # Preserve already-generated artwork while allowing caption/title enrichment if empty
             if not old.title:
                 old.title = scripted.title
+            if not old.beat:
+                old.beat = scripted.beat
             new_pages.append(old)
             continue
         new_pages.append(
@@ -1332,6 +1387,7 @@ async def generate_story(sid: str, body: StoryGenerateRequest) -> StoryStateView
                 caption_text=scripted.caption_text,
                 character_ids=scripted.character_ids
                 or [c.id for c in state.characters if c.approved],
+                beat=scripted.beat,
                 status="pending",
             )
         )
@@ -1351,6 +1407,7 @@ async def generate_story(sid: str, body: StoryGenerateRequest) -> StoryStateView
         premise=state.story_premise,
         synopsis=state.story_synopsis,
         pages_updated=updated_count,
+        warnings=_reading_warnings(state),
     )
 
 
@@ -1432,6 +1489,8 @@ async def insert_contextual_page(
             new_index=new_index,
             total_after=total_after,
             hint=body.hint,
+            story_context=_story_context(state),
+            caption_max_words=_caption_cap(state),
             provider=state.provider,
             model=state.model,
         )
@@ -1451,6 +1510,7 @@ async def insert_contextual_page(
         prompt=scripted.scene_prompt,
         caption_text=scripted.caption_text,
         character_ids=char_ids,
+        beat=by_idx[body.after_index].beat if body.after_index in by_idx else "",
         status="pending",
     )
     try:
@@ -1670,9 +1730,12 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 pages=target_pages,
                 preset=preset,
                 style_context=state.context_prompt,
-                premise_hint=req.premise_hint or state.story_premise,
+                premise_hint=req.premise_hint or _story_premise(state),
                 mode=req.mode,
                 language=req.language,
+                story_context=_story_context(state),
+                page_beats=_page_beats(state, target_pages),
+                caption_max_words=_caption_cap(state),
                 provider=provider_name,
                 model=model_name,
             )
@@ -1714,6 +1777,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                     title=p.title,
                     prompt=p.scene_prompt,
                     caption_text=p.caption_text,
+                    beat=p.beat,
                     character_ids=(
                         list(
                             dict.fromkeys(
@@ -2093,6 +2157,8 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 back_extra_images=_extra_page_images(state, "back"),
                 synopsis=state.story_synopsis,
                 publisher_logo=store.publisher_logo_for(state),
+                profile=get_profile(state.print_profile),
+                rtl=reads_right_to_left(state.story_brief),
             )
             state.pdf_ready = True
             store.save_session(state)

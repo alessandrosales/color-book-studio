@@ -55,6 +55,35 @@ def _layout_script_guidance(preset: StylePreset | None) -> str:
     )
 
 
+def _story_context_block(story_context: str) -> str:
+    """Author-defined brief/bible that every text generation must follow."""
+    ctx = story_context.strip()
+    if not ctx:
+        return ""
+    return (
+        "\nThe author defined the context below. It is BINDING: follow its audience, tone, cast, "
+        "world rules, beat order and MUST AVOID list over any generic idea.\n"
+        f"{ctx}\n\n"
+    )
+
+
+def _beat_and_length_block(page_beats: list[str] | None, caption_max_words: int | None) -> str:
+    """Per-page beat plan and the audience's caption length cap."""
+    lines: list[str] = []
+    if page_beats:
+        lines.append(
+            "Beat plan (MANDATORY): each page must dramatise exactly its beat, in this order. "
+            "Consecutive pages that share a beat show different moments of it."
+        )
+        lines.extend(f"- Page {i}: {beat}" for i, beat in enumerate(page_beats, start=1))
+    if caption_max_words:
+        lines.append(
+            f"Caption length for this audience: caption_text has AT MOST {caption_max_words} words "
+            "(this overrides any other word limit)."
+        )
+    return ("\n" + "\n".join(lines) + "\n") if lines else ""
+
+
 class StoryGenerationError(RuntimeError):
     """Raised when story/script generation fails or no text backend is available."""
 
@@ -72,6 +101,7 @@ class ScriptedPage(BaseModel):
     caption_text: str = ""
     character_names: list[str] = Field(default_factory=list)
     character_ids: list[str] = Field(default_factory=list)
+    beat: str = ""
 
 
 class StoryPlan(BaseModel):
@@ -242,6 +272,9 @@ def generate_story_plan(
     preset: StylePreset | None = None,
     style_context: str = "",
     characters: list[CharacterBrief] | None = None,
+    story_context: str = "",
+    page_beats: list[str] | None = None,
+    caption_max_words: int | None = None,
     provider: str = "",
     model: str | None = None,
 ) -> StoryPlan:
@@ -296,7 +329,9 @@ def generate_story_plan(
         f"Layout & text placement rule: {_layout_script_guidance(preset)}\n"
         f"Premise / Theme: {clean_premise}\n"
         f"Exact number of pages required: {pages}\n"
-        f"Registered characters:\n{cast_lines}\n\n"
+        f"Registered characters:\n{cast_lines}\n"
+        f"{_story_context_block(story_context)}"
+        f"{_beat_and_length_block(page_beats, caption_max_words)}\n"
         "Rules:\n"
         "- Generate EXACTLY the requested number of pages, numbered 1..N.\n"
         "- Every scene_prompt must describe ONE clear, drawable, high-converting coloring scene with distinct pose/setting (avoid repeating compositions).\n"
@@ -342,6 +377,7 @@ def generate_story_plan(
                 caption_text=caption,
                 character_names=names,
                 character_ids=unique_ids,
+                beat=page_beats[i] if page_beats and i < len(page_beats) else "",
             )
         )
 
@@ -361,6 +397,9 @@ def generate_full_book_blueprint(
     premise_hint: str = "",
     mode: StoryMode | None = None,
     language: str = "en",
+    story_context: str = "",
+    page_beats: list[str] | None = None,
+    caption_max_words: int | None = None,
     provider: str = "",
     model: str | None = None,
 ) -> FullBookBlueprint:
@@ -447,7 +486,9 @@ def generate_full_book_blueprint(
         f"{concept_line}"
         f"{hint_line}\n"
         f"Character rule: {char_guidance}\n"
-        f"Exact number of pages required: {pages}\n\n"
+        f"Exact number of pages required: {pages}\n"
+        f"{_story_context_block(story_context)}"
+        f"{_beat_and_length_block(page_beats, caption_max_words)}\n"
         "Strict rules:\n"
         "- Produce EXACTLY the requested number of pages, numbered 1..N.\n"
         "- Every page must have a distinct, joyful, high-converting composition with varied actions and props.\n"
@@ -496,6 +537,7 @@ def generate_full_book_blueprint(
                 scene_prompt=scene,
                 caption_text=caption,
                 character_names=names,
+                beat=page_beats[i] if page_beats and i < len(page_beats) else "",
             )
         )
 
@@ -533,6 +575,8 @@ def generate_bridge_page(
     new_index: int = 1,
     total_after: int = 1,
     hint: str = "",
+    story_context: str = "",
+    caption_max_words: int | None = None,
     provider: str = "",
     model: str | None = None,
 ) -> ScriptedPage:
@@ -605,7 +649,9 @@ def generate_bridge_page(
         f"Registered characters:\n{cast_lines}\n\n"
         f"{_describe_neighbor('Previous page', prev_page)}\n\n"
         f"{_describe_neighbor('Next page', next_page)}\n"
-        f"{hint_block}\n"
+        f"{hint_block}"
+        f"{_story_context_block(story_context)}"
+        f"{_beat_and_length_block(None, caption_max_words)}\n"
         f"Task: {bridge_goal}\n"
         "Rules:\n"
         "- Return ONE single scene object matching the JSON schema.\n"
@@ -673,6 +719,7 @@ def generate_book_finishing(
     style_context: str = "",
     characters: list[CharacterBrief] | None = None,
     pages: list[ScriptedPage] | None = None,
+    story_context: str = "",
     provider: str = "",
     model: str | None = None,
 ) -> BookFinishing:
@@ -717,7 +764,8 @@ def generate_book_finishing(
         f"Current synopsis: {synopsis.strip() or '(not set)'}\n"
         f"Visual style: {style_desc}\n"
         f"Characters:\n{cast_lines}\n\n"
-        f"Finished story pages:\n{page_lines}\n\n"
+        f"Finished story pages:\n{page_lines}\n"
+        f"{_story_context_block(story_context)}\n"
         "Task: read the finished pages and write everything that frames this coloring book.\n"
         "- title: a catchy, coherent title (max 8 words) that fits what actually happens in the "
         "pages and names the main character when it helps. Keep the working title if it already "

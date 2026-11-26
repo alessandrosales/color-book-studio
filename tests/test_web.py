@@ -160,7 +160,7 @@ def test_kdp_interior_export_omits_cover_and_requires_complete_pages() -> None:
     assert len(pdf.pages[2].images) == 1
 
 
-def test_kdp_interior_export_rejects_unimplemented_bleed(monkeypatch) -> None:
+def test_kdp_interior_export_supports_bleed(monkeypatch) -> None:
     from color_book_generator.config import BookConfig
 
     session = client.post(
@@ -177,8 +177,11 @@ def test_kdp_interior_export_rejects_unimplemented_bleed(monkeypatch) -> None:
         lambda: BookConfig(theme="test", bleed_in=0.125),
     )
     response = client.post(f"/api/sessions/{state.id}/kdp-interior")
-    assert response.status_code == 400
-    assert any("sangria" in error for error in response.json()["detail"])
+    assert response.status_code == 200, response.text
+    pdf = PdfReader(io.BytesIO(response.content))
+    # Page box is the trim plus 0.125" of bleed on every side.
+    assert float(pdf.pages[0].mediabox.width) == (8.5 + 0.25) * 72
+    assert float(pdf.pages[0].mediabox.height) == (11 + 0.25) * 72
 
 
 def test_unknown_session_and_page() -> None:

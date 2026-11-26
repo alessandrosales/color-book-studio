@@ -215,6 +215,26 @@ def draw_caption(
         _draw_plain(draw, font, lines, box, size, cfg.bold)
 
 
+def caption_font_px(text: str, cfg: CaptionConfig, target_px: tuple[int, int]) -> int:
+    """Font size draw_caption would end up using after shrinking ``text`` to fit its band."""
+    band_height = round(target_px[1] * cfg.band_ratio)
+    if not text.strip() or band_height <= 0:
+        return 0
+    width = target_px[0]
+    side_pad = round(width * 0.05)
+    inner_pad = round(band_height * 0.12)
+    draw = ImageDraw.Draw(Image.new("L", (1, 1)))
+    _font_obj, _lines, size = _layout(
+        draw,
+        text.strip(),
+        width - 2 * side_pad,
+        band_height - 2 * inner_pad,
+        round(width * cfg.font_size_ratio),
+        cfg.font_family,
+    )
+    return size
+
+
 def caption_band_height(target_px: tuple[int, int], cfg: CaptionConfig, text: str) -> int:
     if not cfg.enabled or not text.strip():
         return 0

@@ -29,6 +29,7 @@ from starlette.responses import Response
 from color_book_generator import __version__
 from color_book_generator.auth import codex as codex_auth
 from color_book_generator.auth.codex import DEFAULT_CODEX_MODEL, normalize_codex_model
+from color_book_generator.brief import reads_right_to_left
 from color_book_generator.config import (
     BookConfig,
     CaptionConfig,
@@ -37,8 +38,14 @@ from color_book_generator.config import (
     default_book_config_path,
     load_book_config,
 )
-from color_book_generator.layout.pdf import compose_pdf
+from color_book_generator.layout.pdf import (
+    compose_pdf,
+    describe_adjustment,
+    interior_adjustments,
+    plan_interior,
+)
 from color_book_generator.presets import default_page_layout_for_category, get_preset
+from color_book_generator.print_profile import PRINT_PROFILES, get_profile
 from color_book_generator.processing.line_art import prepare_page, score_line_art
 from color_book_generator.prompts import (
     compose_page_prompt,
@@ -52,6 +59,8 @@ from color_book_generator.story import StoryMode
 from color_book_generator.web import archive as backup_archive
 from color_book_generator.web import store
 from color_book_generator.web.auth_flow import flow as codex_flow
+from color_book_generator.web.reading import build_report
+from color_book_generator.web.routers.brief import router as brief_router
 from color_book_generator.web.routers.presets import router as presets_router
 from color_book_generator.web.routers.studio import (
     AutopilotStatus,
@@ -96,6 +105,7 @@ app = FastAPI(
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(presets_router)
 app.include_router(studio_router)
+app.include_router(brief_router)
 
 
 def _allowed_hosts() -> set[str]:
@@ -309,11 +319,12 @@ class SessionPatch(BaseModel):
     include_belongs_to_page: bool | None = None
     include_color_test_page: bool | None = None
     include_publisher_logo: bool | None = None
+    print_profile: str | None = None
     cover_include: bool | None = None
     cover_color: bool | None = None
     cover_title: str | None = None
     cover_prompt: str | None = None
-    current_step: int | None = Field(default=None, ge=1, le=5)
+    current_step: int | None = Field(default=None, ge=0, le=5)
     caption_enabled: bool | None = None
     caption_style: CaptionStyle | None = None
     caption_position: CaptionPosition | None = None
@@ -352,6 +363,7 @@ class PageView(BaseModel):
     prompt: str
     caption_text: str
     character_ids: list[str]
+    beat: str = ""
     status: str
     error: str | None
     updated_at: datetime | None
@@ -409,6 +421,7 @@ class SessionView(BaseModel):
     back_extra_pages: list[ExtraPageView] = Field(default_factory=list)
     include_publisher_logo: bool = True
     publisher_logo_url: str | None = None
+    print_profile: str = "kdp_paperback"
     current_step: int = 1
 
 
@@ -427,6 +440,7 @@ def _page_view(state: SessionState, page: PageState) -> PageView:
         prompt=page.prompt,
         caption_text=page.caption_text,
         character_ids=page.character_ids,
+        beat=page.beat,
         status=page.status,
         error=page.error,
         updated_at=page.updated_at,
@@ -521,6 +535,7 @@ def _session_view(state: SessionState) -> SessionView:
         ],
         include_publisher_logo=state.include_publisher_logo,
         publisher_logo_url=_publisher_logo_url(),
+        print_profile=state.print_profile,
         current_step=state.current_step,
     )
 
@@ -1241,6 +1256,11 @@ def patch_session(sid: str, body: SessionPatch) -> SessionView:
     if body.include_publisher_logo is not None:
         state.include_publisher_logo = body.include_publisher_logo
         state.pdf_ready = False
+    if body.print_profile is not None:
+        if body.print_profile not in PRINT_PROFILES:
+            raise HTTPException(status_code=400, detail="perfil de impressao desconhecido")
+        state.print_profile = body.print_profile
+        state.pdf_ready = False
     if body.cover_include is not None:
         state.cover_include = body.cover_include
         state.pdf_ready = False
@@ -1445,10 +1465,33 @@ def compose(sid: str) -> SessionView:
         back_extra_images=_extra_page_images(state, "back"),
         synopsis=state.story_synopsis,
         publisher_logo=store.publisher_logo_for(state),
+        profile=get_profile(state.print_profile),
+        rtl=_is_rtl(state),
     )
     state.pdf_ready = True
     store.save_session(state)
     return _session_view(state)
+
+
+def _is_rtl(state: SessionState) -> bool:
+    """Right-to-left reading (manga answered so in the briefing)."""
+    return reads_right_to_left(state.story_brief)
+
+
+@app.get("/api/print-profiles")
+def list_print_profiles() -> list[dict[str, object]]:
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "page_multiple": p.page_multiple,
+            "min_pages": p.min_pages,
+            "max_pages": p.max_pages,
+            "supported_sizes": sorted(p.supported_sizes),
+        }
+        for p in PRINT_PROFILES.values()
+    ]
 
 
 @app.get("/api/sessions/{sid}/kdp-preflight")
@@ -1462,22 +1505,56 @@ def kdp_preflight(sid: str) -> dict[str, object]:
     if len(pages) != len(state.pages):
         errors.append("Há ilustrações pendentes ou arquivos de página ausentes.")
 
-    front_count = sum((state.include_title_page, state.include_belongs_to_page,
-                       state.include_color_test_page))
     for extra in state.front_extra_pages + state.back_extra_pages:
         if extra.include_in_pdf and (extra.status != "done" or not store.extra_page_path(sid, extra.id).exists()):
             errors.append(f"A página extra '{extra.title or extra.id}' ainda não está pronta.")
-    front_count += sum(extra.include_in_pdf for extra in state.front_extra_pages)
-    back_count = sum(extra.include_in_pdf for extra in state.back_extra_pages)
-    alignment = int(bool(state.blank_verso and state.pages and front_count % 2))
-    physical_pages = front_count + alignment + len(state.pages) * (2 if state.blank_verso else 1) + back_count
-    rounded_pages = physical_pages + physical_pages % 2
-    if rounded_pages < 24:
-        errors.append(f"O KDP exige pelo menos 24 páginas físicas. Contagem prevista: {rounded_pages}.")
-    if cfg.page_size == "square_8x8":
-        warnings.append("Confirme o formato 8 x 8 pol. no KDP para o mercado e as opções de impressão escolhidas.")
-    if cfg.bleed_in:
-        errors.append("A geometria de sangria deste PDF ainda precisa ser adaptada ao perfil KDP.")
+
+    profile = get_profile(state.print_profile)
+    rtl = _is_rtl(state)
+    plan_args = {
+        "include_title_page": state.include_title_page,
+        "blank_verso": state.blank_verso,
+        "include_belongs_to_page": state.include_belongs_to_page,
+        "include_color_test_page": state.include_color_test_page,
+        "front_extra_images": _extra_page_images(state, "front"),
+        "back_extra_images": _extra_page_images(state, "back"),
+        "publisher_logo": store.publisher_logo_for(state),
+        "rtl": rtl,
+    }
+    # Plan with every scripted page, generated or not, so the count is known up front.
+    planned = [store.page_file(sid, page.index) for page in sorted(state.pages, key=lambda p: p.index)]
+    physical_pages = len(plan_interior(planned, **plan_args))  # type: ignore[arg-type]
+    ops = plan_interior(planned, profile=profile, **plan_args)  # type: ignore[arg-type]
+    rounded_pages = len(ops)
+    if rounded_pages < profile.min_pages:
+        errors.append(
+            f"{profile.name} exige pelo menos {profile.min_pages} páginas. Contagem prevista: {rounded_pages}."
+        )
+    if rounded_pages > profile.max_pages:
+        errors.append(
+            f"{profile.name} aceita no máximo {profile.max_pages} páginas. Contagem prevista: {rounded_pages}."
+        )
+    if rounded_pages > physical_pages:
+        warnings.append(
+            f"{rounded_pages - physical_pages} página(s) em branco serão adicionadas antes das páginas finais "
+            f"para fechar múltiplo de {profile.page_multiple}."
+        )
+    if profile.supported_sizes and cfg.page_size not in profile.supported_sizes:
+        errors.append(f"O formato escolhido não é um tamanho padrão de {profile.name}.")
+    gutter = profile.gutter_in(rounded_pages)
+    warnings.append(
+        f"Margem interna (lombada) de {gutter * 25.4:.1f} mm para {rounded_pages} páginas; "
+        f"externa de {profile.outside(cfg.bleed_in > 0) * 25.4:.1f} mm."
+    )
+    if profile.spine_per_page_in:
+        spine = profile.spine_in(rounded_pages)
+        warnings.append(f"Lombada estimada: {spine * 25.4:.1f} mm.")
+    try:
+        adjustments = interior_adjustments(ops, cfg, profile, rtl=rtl)
+    except (OSError, ValueError):
+        adjustments = []
+    warnings.extend(describe_adjustment(adj) for adj in adjustments)
+    warnings.extend(profile.notes)
     for path in pages:
         try:
             with Image.open(path) as image:
@@ -1487,16 +1564,19 @@ def kdp_preflight(sid: str) -> dict[str, object]:
                 warnings.append(f"{path.name} tem menos de 300 pixels por polegada no tamanho de impressão.")
         except (OSError, ValueError):
             errors.append(f"Não foi possível ler a imagem {path.name}.")
+    warnings.extend(build_report(state, cfg, _session_caption(state)).warnings)
     interior_errors = errors.copy()
     errors.append("A capa completa em PDF separado ainda não está disponível.")
     if state.cover_include:
         warnings.append("A prévia atual pode incluir a capa no miolo; a contagem acima considera a capa separada.")
     warnings.append("A resolução dos arquivos processados não comprova a qualidade da imagem original.")
-    warnings.append("Confira as margens e os cortes de cada página no tamanho final de impressão.")
     warnings.append("Revise direitos, metadados, conteúdo gerado por IA e fontes antes de publicar.")
     warnings.append("A exportação do miolo ainda usa fontes PDF padrão; confira a incorporação e os caracteres antes do envio.")
     warnings.append("Confira os arquivos no KDP Print Previewer e revise uma prova física.")
     return {"physical_pages": physical_pages, "kdp_pages": rounded_pages,
+            "profile": profile.id, "profile_name": profile.name,
+            "gutter_mm": round(gutter * 25.4, 1),
+            "adjusted_pages": [adj.page_number for adj in adjustments],
             "interior_errors": interior_errors, "errors": errors, "warnings": warnings}
 
 
@@ -1525,6 +1605,8 @@ def export_kdp_interior(sid: str) -> FileResponse:
                 back_extra_images=_extra_page_images(state, "back"),
                 synopsis=state.story_synopsis,
                 publisher_logo=store.publisher_logo_for(state),
+                profile=get_profile(state.print_profile),
+                rtl=_is_rtl(state),
             )
         except BaseException:
             path.unlink(missing_ok=True)

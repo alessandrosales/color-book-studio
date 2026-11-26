@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
+from color_book_generator.brief import StoryBible, StoryBrief
 from color_book_generator.config import PageSizeName, ProcessingConfig
 from color_book_generator.fsutil import atomic_write_text
 from color_book_generator.presets import StylePreset
@@ -99,6 +100,7 @@ class PageState(BaseModel):
     prompt: str
     caption_text: str = ""
     character_ids: list[str] = Field(default_factory=list)
+    beat: str = ""
     status: PageStatus = "pending"
     error: str | None = None
     seed: int | None = None
@@ -168,6 +170,8 @@ class SessionState(BaseModel):
     story_mode: StoryMode = "narrative"
     story_premise: str = ""
     story_synopsis: str = ""
+    story_brief: StoryBrief = Field(default_factory=StoryBrief)
+    story_bible: StoryBible | None = None
     blank_verso: bool = False
     include_title_page: bool = True
     include_belongs_to_page: bool = False
@@ -182,6 +186,7 @@ class SessionState(BaseModel):
     front_extra_pages: list[ExtraPage] = Field(default_factory=list)
     back_extra_pages: list[ExtraPage] = Field(default_factory=list)
     include_publisher_logo: bool = True
+    print_profile: str = "kdp_paperback"
     current_step: int = 1
 
     # JSON snapshot of what this object last read from / wrote to disk. Used by
@@ -543,6 +548,7 @@ def create_session(
     include_title_page: bool = True,
     include_belongs_to_page: bool = False,
     include_color_test_page: bool = False,
+    current_step: int = 0,
 ) -> SessionState:
     sid = new_session_id()
     state = SessionState(
@@ -571,6 +577,7 @@ def create_session(
         include_title_page=include_title_page,
         include_belongs_to_page=include_belongs_to_page,
         include_color_test_page=include_color_test_page,
+        current_step=current_step,
     )
     for d in (
         session_dir(sid),

@@ -43,29 +43,36 @@
 
       <nav class="stepper-wrap" aria-label="Etapas de criação do livro">
         <div class="stepper" id="stepper">
-          <button class="step-tab is-active" type="button" data-step="1" aria-current="step">
+          <button class="step-tab is-active" type="button" data-step="0" aria-current="step">
             <span class="step-num">1</span>
+            <span class="step-text">
+              <span class="step-title">Briefing</span>
+              <span class="step-sub" id="step-0-sub">Contexto da história</span>
+            </span>
+          </button>
+          <button class="step-tab" type="button" data-step="1">
+            <span class="step-num">2</span>
             <span class="step-text">
               <span class="step-title">Estilo e formato</span>
               <span class="step-sub" id="step-1-sub">Estilo, formato e fonte</span>
             </span>
           </button>
           <button class="step-tab" type="button" data-step="2">
-            <span class="step-num">2</span>
+            <span class="step-num">3</span>
             <span class="step-text">
               <span class="step-title">Personagens</span>
               <span class="step-sub" id="step-2-sub">0 personagens</span>
             </span>
           </button>
           <button class="step-tab" type="button" data-step="3">
-            <span class="step-num">3</span>
+            <span class="step-num">4</span>
             <span class="step-text">
               <span class="step-title">História e páginas</span>
               <span class="step-sub" id="step-3-sub">0 / 0 prontas</span>
             </span>
           </button>
           <button class="step-tab" type="button" data-step="4">
-            <span class="step-num">4</span>
+            <span class="step-num">5</span>
             <span class="step-text">
               <span class="step-title">Capa e finalização</span>
               <span class="step-sub" id="step-4-sub">Capa e PDF</span>
@@ -93,12 +100,229 @@
       </div>
 
       <main class="studio-main" id="main-content">
-        <!-- ==================== STAGE 1: ESTILO E FORMATO ==================== -->
-        <section class="stage-panel" id="stage-1" data-stage="1" aria-labelledby="stage-1-heading">
+        <!-- ==================== STAGE 0: BRIEFING ==================== -->
+        <section class="stage-panel" id="stage-0" data-stage="0" aria-labelledby="stage-0-heading">
           <div class="stage-head">
             <div class="stage-head-left">
               <div class="stage-title-row">
                 <span class="stage-big-num" aria-hidden="true">1.</span>
+                <h1 id="stage-0-heading">Briefing da história</h1>
+              </div>
+              <p class="hint">
+                Defina para quem é o livro, o que ele deve dizer e o que evitar. A IA propõe premissas e monta a bíblia da história, que depois guia o roteiro, as páginas novas e a capa.
+              </p>
+            </div>
+            <span class="pill" id="brief-status-pill">Sem bíblia</span>
+          </div>
+
+          <div class="brief-suggestions is-hidden" id="brief-preset-wrap">
+            <span class="hint hint-sm">Estilos que combinam com este público:</span>
+            <div class="brief-chip-row" id="brief-preset-suggestions"></div>
+          </div>
+
+          <div class="brief-grid">
+            <div class="floating-card">
+              <h2>Para quem e por quê</h2>
+              <div class="field-row field-row-2">
+                <label class="field-label">
+                  <span>Faixa etária</span>
+                  <select id="brief-age_band" class="field" data-brief="age_band">
+                    <option value="">Não definida</option>
+                    <option value="0-3">0 a 3 anos</option>
+                    <option value="3-5">3 a 5 anos</option>
+                    <option value="6-9">6 a 9 anos</option>
+                    <option value="10-14">10 a 14 anos</option>
+                    <option value="teen">Adolescente</option>
+                    <option value="adult">Adulto</option>
+                  </select>
+                </label>
+                <label class="field-label">
+                  <span>Quem lê</span>
+                  <select id="brief-reader" class="field" data-brief="reader">
+                    <option value="">Não definido</option>
+                    <option value="child_alone">A criança sozinha</option>
+                    <option value="adult_reading">Adulto lendo junto</option>
+                    <option value="adult">Adulto</option>
+                  </select>
+                </label>
+              </div>
+              <div class="field-row field-row-2">
+                <label class="field-label">
+                  <span>Objetivo do livro</span>
+                  <select id="brief-purpose" class="field" data-brief="purpose">
+                    <option value="">Não definido</option>
+                    <option value="entertain">Entreter</option>
+                    <option value="value">Ensinar um valor</option>
+                    <option value="educational">Educativo</option>
+                    <option value="relax">Relaxar</option>
+                    <option value="gift">Presente personalizado</option>
+                  </select>
+                </label>
+                <label class="field-label">
+                  <span>Idioma do livro</span>
+                  <select id="brief-language" class="field">
+                    <option value="en">English</option>
+                    <option value="pt-BR">Português (BR)</option>
+                    <option value="es">Español</option>
+                  </select>
+                </label>
+              </div>
+              <label class="field-label">
+                <span class="brief-label-row">Ideia central <em class="brief-required">obrigatória</em> <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="logline">Sugerir</button></span>
+                <textarea id="brief-logline" class="field" rows="3" data-brief="logline" placeholder="Ex.: Uma raposinha com medo do escuro descobre que as estrelas também são luz."></textarea>
+              </label>
+              <label class="field-label">
+                <span class="brief-label-row">Mensagem ou moral <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="moral">Sugerir</button></span>
+                <input id="brief-moral" class="field" type="text" data-brief="moral" placeholder="Ex.: coragem é agir mesmo com medo" />
+              </label>
+              <div class="field-row field-row-2">
+                <label class="field-label">
+                  <span class="brief-label-row">Tom <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="tone">Sugerir</button></span>
+                  <input id="brief-tone" class="field" type="text" data-brief="tone" placeholder="Ex.: doce e engraçado" />
+                </label>
+                <label class="field-label">
+                  <span>Final</span>
+                  <select id="brief-ending" class="field" data-brief="ending">
+                    <option value="">Livre</option>
+                    <option value="happy">Feliz</option>
+                    <option value="open">Aberto</option>
+                    <option value="twist">Surpresa</option>
+                    <option value="circular">Circular (volta ao início)</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+
+            <div class="floating-card">
+              <h2>Mundo e personagens</h2>
+              <label class="field-label">
+                <span class="brief-label-row">Mundo e cenário <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="world">Sugerir</button></span>
+                <textarea id="brief-world" class="field" rows="2" data-brief="world" placeholder="Ex.: floresta encantada, sem humanos"></textarea>
+              </label>
+              <div class="field-row field-row-2">
+                <label class="field-label">
+                  <span class="brief-label-row">Protagonista <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="protagonist_name">Sugerir</button></span>
+                  <input id="brief-protagonist_name" class="field" type="text" data-brief="protagonist_name" placeholder="Ex.: Lia" />
+                </label>
+                <label class="field-label">
+                  <span class="brief-label-row">Traço marcante <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="protagonist_trait">Sugerir</button></span>
+                  <input id="brief-protagonist_trait" class="field" type="text" data-brief="protagonist_trait" placeholder="Ex.: curiosa, sempre com um lampião" />
+                </label>
+              </div>
+              <div class="field-row field-row-2">
+                <label class="field-label">
+                  <span class="brief-label-row">O que quer <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="protagonist_want">Sugerir</button></span>
+                  <input id="brief-protagonist_want" class="field" type="text" data-brief="protagonist_want" placeholder="Ex.: ver o céu à noite" />
+                </label>
+                <label class="field-label">
+                  <span class="brief-label-row">Do que tem medo <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="protagonist_fear">Sugerir</button></span>
+                  <input id="brief-protagonist_fear" class="field" type="text" data-brief="protagonist_fear" placeholder="Ex.: do escuro" />
+                </label>
+              </div>
+              <label class="field-label">
+                <span class="brief-label-row">Elenco de apoio <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="supporting_cast">Sugerir</button></span>
+                <textarea id="brief-supporting_cast" class="field" rows="2" data-brief="supporting_cast" placeholder="Ex.: uma coruja sábia, um vagalume tímido"></textarea>
+              </label>
+              <label class="field-label">
+                <span class="brief-label-row">Conflito ou obstáculo <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="conflict">Sugerir</button></span>
+                <textarea id="brief-conflict" class="field" rows="2" data-brief="conflict" placeholder="Ex.: a lanterna apaga no meio da floresta"></textarea>
+              </label>
+            </div>
+
+            <div class="floating-card">
+              <h2>Limites e referências</h2>
+              <label class="field-label">
+                <span class="brief-label-row">Evitar na história <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="avoid">Sugerir</button></span>
+                <textarea id="brief-avoid" class="field" rows="2" data-brief="avoid" placeholder="Ex.: vilões assustadores, violência, temas religiosos"></textarea>
+              </label>
+              <label class="field-label">
+                <span class="brief-label-row">Cultura e regionalismo <button class="btn btn-ghost btn-sm brief-suggest" type="button" data-suggest="cultural_notes">Sugerir</button></span>
+                <input id="brief-cultural_notes" class="field" type="text" data-brief="cultural_notes" placeholder="Ex.: nomes brasileiros, fauna do cerrado" />
+              </label>
+              <label class="field-label">
+                <span>Referências de gosto</span>
+                <input id="brief-references" class="field" type="text" data-brief="references" placeholder="Livros ou estilos que você admira (só inspiração)" />
+              </label>
+              <div class="brief-extras" id="brief-extras"></div>
+              <p class="hint hint-sm" id="brief-structure-hint"></p>
+            </div>
+          </div>
+
+          <p class="error-msg is-hidden" id="brief-error" role="alert"></p>
+          <div class="card-actions brief-actions">
+            <span class="hint hint-sm" id="brief-save-state"></span>
+            <button class="btn btn-outline btn-sm" id="brief-bible-direct" type="button">Gerar bíblia direto</button>
+            <button class="btn btn-accent btn-sm" id="brief-premises-btn" type="button">Sugerir 3 premissas</button>
+          </div>
+
+          <div class="brief-premises is-hidden" id="brief-premises"></div>
+
+          <div class="floating-card brief-bible is-hidden" id="brief-bible">
+            <div class="section-header section-header-inline">
+              <div>
+                <h2>Bíblia da história</h2>
+                <p class="hint hint-sm">Edite o que quiser e trave. Travada, ela vira o contexto fixo do roteiro, das páginas novas, da capa e da sinopse.</p>
+              </div>
+              <span class="pill" id="bible-lock-pill">Rascunho</span>
+            </div>
+            <p class="brief-stale is-hidden" id="bible-stale" role="status">O briefing mudou depois que esta bíblia foi feita. Revise a bíblia ou gere outra.</p>
+            <div class="field-row field-row-2">
+              <label class="field-label">
+                <span>Título provisório</span>
+                <input id="bible-title" class="field" type="text" />
+              </label>
+              <label class="field-label">
+                <span>Tom</span>
+                <input id="bible-tone" class="field" type="text" />
+              </label>
+            </div>
+            <label class="field-label">
+              <span>Ideia central</span>
+              <textarea id="bible-logline" class="field" rows="2"></textarea>
+            </label>
+            <label class="field-label">
+              <span>Resumo</span>
+              <textarea id="bible-summary" class="field" rows="4"></textarea>
+            </label>
+            <div class="field-row field-row-2">
+              <label class="field-label">
+                <span>Moral</span>
+                <input id="bible-moral" class="field" type="text" />
+              </label>
+              <label class="field-label">
+                <span>Regras do mundo (uma por linha)</span>
+                <textarea id="bible-rules" class="field" rows="3"></textarea>
+              </label>
+            </div>
+
+            <h3 class="brief-subhead">Personagens</h3>
+            <div class="bible-rows" id="bible-characters"></div>
+            <button class="btn btn-ghost btn-sm" id="bible-add-character" type="button">Adicionar personagem</button>
+
+            <h3 class="brief-subhead">Arco em batidas</h3>
+            <div class="bible-rows" id="bible-beats"></div>
+            <button class="btn btn-ghost btn-sm" id="bible-add-beat" type="button">Adicionar batida</button>
+
+            <div class="card-actions brief-actions">
+              <button class="btn btn-danger-ghost btn-sm" id="bible-discard" type="button">Descartar</button>
+              <button class="btn btn-outline btn-sm" id="bible-characters-btn" type="button">Criar personagens no livro</button>
+              <button class="btn btn-outline btn-sm" id="bible-save" type="button">Salvar bíblia</button>
+              <button class="btn btn-primary btn-sm" id="bible-lock" type="button">Travar bíblia</button>
+            </div>
+          </div>
+
+          <div class="stage-footer">
+            <span></span>
+            <button class="btn btn-primary btn-sm" type="button" data-goto-step="1">Ir para estilo e formato</button>
+          </div>
+        </section>
+
+        <!-- ==================== STAGE 1: ESTILO E FORMATO ==================== -->
+        <section class="stage-panel is-hidden" id="stage-1" data-stage="1" aria-labelledby="stage-1-heading">
+          <div class="stage-head">
+            <div class="stage-head-left">
+              <div class="stage-title-row">
+                <span class="stage-big-num" aria-hidden="true">2.</span>
                 <h1 id="stage-1-heading">Estilo e formato</h1>
               </div>
               <p class="hint">
@@ -129,12 +353,24 @@
                 <label class="field-label">
                   <span>Formato</span>
                   <select id="page-size" class="field">
-                    <option value="square_8.5x8.5">Quadrado 8.5 x 8.5 in</option>
-                    <option value="letter_8.5x11">Carta 8.5 x 11 in</option>
-                    <option value="6x9">6 x 9 in</option>
-                    <option value="square_8x8">Quadrado 8 x 8 in</option>
-                    <option value="8x10">8 x 10 in</option>
-                    <option value="a4">A4</option>
+                    <optgroup label="Colorir e infantil">
+                      <option value="letter_8.5x11">Carta 8.5 x 11 in (KDP)</option>
+                      <option value="square_8.5x8.5">Quadrado 8.5 x 8.5 in (KDP)</option>
+                      <option value="square_8.25x8.25">Quadrado 8.25 x 8.25 in (KDP)</option>
+                      <option value="8x10">8 x 10 in (KDP)</option>
+                      <option value="a4">A4 21 x 29,7 cm (KDP)</option>
+                      <option value="br_21x28">21 x 28 cm (gráfica BR)</option>
+                      <option value="square_8x8">Quadrado 8 x 8 in</option>
+                    </optgroup>
+                    <optgroup label="Mangá, manhwa e HQ">
+                      <option value="6x9">6 x 9 in (KDP)</option>
+                      <option value="5x8">5 x 8 in (KDP)</option>
+                      <option value="manga_5x7.5">Mangá EUA 5 x 7.5 in</option>
+                      <option value="b6_jp">B6 japonês 12,8 x 18,2 cm</option>
+                      <option value="a5">A5 14,8 x 21 cm</option>
+                      <option value="formatinho_13.5x19">Formatinho 13,5 x 19 cm</option>
+                      <option value="americano_17x26">Americano 17 x 26 cm</option>
+                    </optgroup>
                   </select>
                 </label>
                 <label class="field-label">
@@ -276,7 +512,7 @@
           </div>
 
           <div class="stage-footer">
-            <span></span>
+            <button class="btn btn-outline btn-sm" type="button" data-goto-step="0">Voltar para o briefing</button>
             <button class="btn btn-primary btn-sm" type="button" data-goto-step="2">Ir para personagens</button>
           </div>
         </section>
@@ -286,7 +522,7 @@
           <div class="stage-head">
             <div class="stage-head-left">
               <div class="stage-title-row">
-                <span class="stage-big-num" aria-hidden="true">2.</span>
+                <span class="stage-big-num" aria-hidden="true">3.</span>
                 <h1 id="stage-2-heading">Personagens e folhas de referência</h1>
               </div>
               <p class="hint">
@@ -340,7 +576,7 @@
           <div class="stage-head">
             <div class="stage-head-left">
               <div class="stage-title-row">
-                <span class="stage-big-num" aria-hidden="true">3.</span>
+                <span class="stage-big-num" aria-hidden="true">4.</span>
                 <h1 id="stage-3-heading">História e páginas</h1>
               </div>
               <p class="hint" id="pages-subtitle">
@@ -358,7 +594,7 @@
               <h2>Roteiro do livro</h2>
               <label class="field-label">
                 <span>Premissa ou tema</span>
-                <textarea id="story-premise" class="field" rows="5" placeholder="Ex.: Um dia chuvoso em que Barnaby prepara chá, assa biscoitos e monta uma cabana."></textarea>
+                <textarea id="story-premise" class="field" rows="5" placeholder="Vazio usa a ideia central do briefing. Ex.: Um dia chuvoso em que Barnaby prepara chá."></textarea>
               </label>
 
               <div class="field-row field-row-2">
@@ -381,6 +617,13 @@
               <div class="card-actions">
                 <button class="btn btn-accent btn-sm" id="story-generate-btn" type="button">Gerar roteiro</button>
                 <button class="btn btn-outline btn-sm" id="story-save-btn" type="button">Salvar roteiro</button>
+              </div>
+
+              <div class="reading-panel" id="reading-panel" aria-live="polite">
+                <h3 class="brief-subhead">Padrões de leitura</h3>
+                <p class="hint hint-sm" id="reading-summary">Carregando…</p>
+                <ul class="reading-issues" id="reading-issues"></ul>
+                <button class="btn btn-outline btn-sm is-hidden" id="reading-apply-font" type="button">Aplicar fonte recomendada</button>
               </div>
             </aside>
 
@@ -410,7 +653,7 @@
           <div class="stage-head">
             <div class="stage-head-left">
               <div class="stage-title-row">
-                <span class="stage-big-num" aria-hidden="true">4.</span>
+                <span class="stage-big-num" aria-hidden="true">5.</span>
                 <h1 id="stage-4-heading">Capa, páginas extras e PDF</h1>
               </div>
               <p class="hint">
@@ -420,6 +663,14 @@
             <div class="topbar-actions">
               <span class="pill" id="pdf-final-status">PDF ainda não gerado</span>
             </div>
+          </div>
+
+          <div class="print-profile-row">
+            <label class="field-label">
+              <span>Onde o livro será impresso</span>
+              <select id="print-profile" class="field"></select>
+            </label>
+            <p class="hint hint-sm" id="print-profile-hint"></p>
           </div>
 
           <div class="kdp-bar">
@@ -453,8 +704,8 @@
           <p class="error-msg is-hidden" id="pdf-final-error" role="alert"></p>
 
           <div class="floating-card">
-            <h2>Verificação para KDP</h2>
-            <p class="hint hint-sm">Confira a contagem prevista de páginas e as pendências antes de exportar o miolo. Capa completa, fontes e direitos devem ser revisados separadamente.</p>
+            <h2>Verificação de impressão</h2>
+            <p class="hint hint-sm">Confere páginas, margem da lombada e desenhos que precisaram ser ajustados para o perfil escolhido. Capa completa, fontes e direitos devem ser revisados separadamente.</p>
             <div class="card-actions">
               <button class="btn btn-outline btn-sm" id="kdp-preflight-btn" type="button">Verificar livro</button>
               <button class="btn btn-outline btn-sm" id="kdp-interior-btn" type="button">Baixar miolo sem sangria</button>

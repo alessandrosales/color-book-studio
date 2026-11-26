@@ -5,11 +5,19 @@
 
 const PAGE_SIZE_LABEL = {
   "square_8.5x8.5": "Quadrado 8.5x8.5",
+  "square_8.25x8.25": "Quadrado 8.25x8.25",
   "letter_8.5x11": "Carta 8.5x11",
   "6x9": "6x9 in",
+  "5x8": "5x8 in",
   "square_8x8": "Quadrado 8x8",
   "8x10": "8x10 in",
   a4: "A4",
+  a5: "A5",
+  b6_jp: "B6 japonês",
+  "manga_5x7.5": "Mangá 5x7.5",
+  "formatinho_13.5x19": "Formatinho 13,5x19",
+  "americano_17x26": "Americano 17x26",
+  br_21x28: "21x28 cm",
 };
 
 export function formatPageSize(code) {

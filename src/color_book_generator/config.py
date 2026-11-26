@@ -32,7 +32,20 @@ class ProcessingConfig(BaseModel):
 
 
 PageSizeName = Literal[
-    "letter_8.5x11", "a4", "square_8x8", "square_8.5x8.5", "6x9", "8x10"
+    "letter_8.5x11",
+    "a4",
+    "square_8x8",
+    "square_8.5x8.5",
+    "square_8.25x8.25",
+    "6x9",
+    "8x10",
+    "5x8",
+    "a5",
+    "b6_jp",
+    "manga_5x7.5",
+    "formatinho_13.5x19",
+    "americano_17x26",
+    "br_21x28",
 ]
 
 PAGE_SIZES_IN: dict[str, tuple[float, float]] = {
@@ -40,8 +53,17 @@ PAGE_SIZES_IN: dict[str, tuple[float, float]] = {
     "a4": (8.27, 11.69),
     "square_8x8": (8.0, 8.0),
     "square_8.5x8.5": (8.5, 8.5),
+    "square_8.25x8.25": (8.25, 8.25),
     "6x9": (6.0, 9.0),
     "8x10": (8.0, 10.0),
+    "5x8": (5.0, 8.0),
+    # Metric formats, converted from millimetres.
+    "a5": (round(148 / 25.4, 3), round(210 / 25.4, 3)),
+    "b6_jp": (round(128 / 25.4, 3), round(182 / 25.4, 3)),
+    "manga_5x7.5": (5.0, 7.5),
+    "formatinho_13.5x19": (round(135 / 25.4, 3), round(190 / 25.4, 3)),
+    "americano_17x26": (round(170 / 25.4, 3), round(260 / 25.4, 3)),
+    "br_21x28": (round(210 / 25.4, 3), round(280 / 25.4, 3)),
 }
 
 
