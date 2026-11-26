@@ -2297,3 +2297,22 @@ textarea.field {
 .print-export-row .field-label {
   min-width: 160px;
 }
+
+/* ==================== Line weight (story step) ==================== */
+.page-line {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ok-ink);
+}
+
+.page-line.is-warn {
+  color: var(--warn-ink);
+}
+
+.page-line .page-thicken-btn {
+  padding: 2px 8px;
+  min-height: 0;
+  font-size: 12px;
+}

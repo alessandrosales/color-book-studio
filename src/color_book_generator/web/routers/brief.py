@@ -26,6 +26,12 @@ from color_book_generator.brief import (
 from color_book_generator.presets import StylePreset, get_preset
 from color_book_generator.story import StoryGenerationError
 from color_book_generator.web import store
+from color_book_generator.web.line_check import (
+    LineReport,
+    analyze_pages,
+    build_line_report,
+    thicken_page,
+)
 from color_book_generator.web.reading import ReadingReport, build_report
 from color_book_generator.web.routers.studio import (
     _session,
@@ -295,3 +301,43 @@ def apply_recommended_font(sid: str) -> ReadingReport:
     state.pdf_ready = False
     store.save_session(state)
     return _reading(state)
+
+
+@router.get("/lines", response_model=LineReport)
+def get_lines(sid: str) -> LineReport:
+    """Line weight and small colourable areas per page, against the book's audience/style."""
+    state = _session(sid)
+    dpi = _session_book_cfg(state).dpi
+    if analyze_pages(state, dpi, only_missing=True):
+        store.save_session(state)
+    return build_line_report(state, dpi)
+
+
+@router.post("/lines/analyze", response_model=LineReport)
+def reanalyze_lines(sid: str) -> LineReport:
+    state = _session(sid)
+    dpi = _session_book_cfg(state).dpi
+    analyze_pages(state, dpi, only_missing=False)
+    store.save_session(state)
+    return build_line_report(state, dpi)
+
+
+class ThickenResponse(BaseModel):
+    pages_fixed: list[int]
+    report: LineReport
+
+
+@router.post("/lines/thicken", response_model=ThickenResponse)
+def thicken_lines(sid: str, page: int | None = None) -> ThickenResponse:
+    """Thicken thin pages up to the standard (one page, or every fixable page)."""
+    state = _session(sid)
+    dpi = _session_book_cfg(state).dpi
+    analyze_pages(state, dpi, only_missing=True)
+    targets = [p for p in state.pages if p.status == "done" and (page is None or p.index == page)]
+    if page is not None and not targets:
+        raise HTTPException(status_code=404, detail="pagina nao encontrada ou ainda nao gerada")
+    fixed = [p.index for p in targets if thicken_page(state, p, dpi)]
+    if fixed:
+        state.pdf_ready = False
+    store.save_session(state)
+    return ThickenResponse(pages_fixed=fixed, report=build_line_report(state, dpi))

@@ -62,6 +62,7 @@ from color_book_generator.story import StoryMode
 from color_book_generator.web import archive as backup_archive
 from color_book_generator.web import store
 from color_book_generator.web.auth_flow import flow as codex_flow
+from color_book_generator.web.line_check import build_line_report, finish_new_page
 from color_book_generator.web.reading import build_report
 from color_book_generator.web.routers.brief import router as brief_router
 from color_book_generator.web.routers.presets import router as presets_router
@@ -601,6 +602,7 @@ def _write_page_assets(state: SessionState, page: PageState, img: Image.Image) -
         cfg.image_px,
         processing,
     )
+    processed = finish_new_page(state, page, processed, cfg.dpi)
     name = f"page-{page.index:03d}.png"
     img.save(store.raw_dir(state.id) / name, "PNG")
     final = store.pages_dir(state.id) / name
@@ -1588,6 +1590,7 @@ def kdp_preflight(sid: str) -> dict[str, object]:
         except (OSError, ValueError):
             errors.append(f"Não foi possível ler a imagem {path.name}.")
     warnings.extend(build_report(state, cfg, _session_caption(state)).warnings)
+    warnings.extend(build_line_report(state, cfg.dpi).warnings)
     interior_errors = errors.copy()
     geo = _cover_geometry(state, rounded_pages)
     if not store.cover_path(sid).exists():

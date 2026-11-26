@@ -243,3 +243,49 @@ def page_beats(
         brief is not None and brief.extras.get("difficulty", "").lower().startswith("do simples")
     )
     return beat_plan(structure, pages, progressive=progressive)
+
+
+# --------------------------------------------------------------------------
+# Line weight and colourable area
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class LineStandard:
+    key: str
+    label: str
+    line_min_mm: float
+    line_max_mm: float
+    min_region_mm: float
+    # How many areas smaller than min_region_mm a page may have before it is flagged.
+    # Calibrated on well-drawn books: eyes, buttons and small props are normal.
+    tiny_region_allowance: int
+
+
+LINE_STANDARDS: dict[str, LineStandard] = {
+    "0-3": LineStandard("0-3", "0 a 3 anos", 2.5, 4.0, 15.0, 8),
+    "3-5": LineStandard("3-5", "3 a 5 anos", 1.5, 2.5, 8.0, 30),
+    "6-9": LineStandard("6-9", "6 a 9 anos", 1.0, 1.5, 5.0, 60),
+    "cozy": LineStandard("cozy", "Bold & Easy", 1.5, 2.5, 6.0, 30),
+    "kawaii": LineStandard("kawaii", "Kawaii", 1.0, 1.5, 5.0, 60),
+    "comics": LineStandard("comics", "Mangá e manhwa", 0.6, 1.0, 3.0, 400),
+    "intricate": LineStandard("intricate", "Adulto intricado", 0.5, 0.8, 2.0, 2000),
+}
+
+CATEGORY_LINE_KEY: dict[str, str] = {
+    "cozy": "cozy",
+    "kawaii": "kawaii",
+    "manga": "comics",
+    "manhwa": "comics",
+    "adult": "intricate",
+}
+
+
+def line_standard(brief: StoryBrief | None, category: str, preset_id: str | None = None) -> LineStandard:
+    """Line weight target: by style for most categories, by age for children's books."""
+    if category in CATEGORY_LINE_KEY:
+        return LINE_STANDARDS[CATEGORY_LINE_KEY[category]]
+    age = resolve_age_band(brief, category, preset_id)
+    if age in ("0-3", "3-5"):
+        return LINE_STANDARDS[age]
+    return LINE_STANDARDS["6-9"]

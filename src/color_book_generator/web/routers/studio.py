@@ -56,6 +56,7 @@ from color_book_generator.story import (
 )
 from color_book_generator.typography import detect_typography
 from color_book_generator.web import store
+from color_book_generator.web.line_check import finish_new_page
 from color_book_generator.web.reading import build_report
 from color_book_generator.web.store import (
     BookCharacter,
@@ -2000,6 +2001,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 page_neg: str = page_negative,
                 proc_cfg: ProcessingConfig = page_processing,
                 page_idx: int = page.index,
+                page_state: PageState = page,
             ) -> tuple[Image.Image, Image.Image]:
                 provider = get_provider(provider_name, model_name)
                 effective_style = (
@@ -2017,6 +2019,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                     style_reference=effective_style,
                 )
                 proc = prepare_page(raw_img, cfg.image_px, proc_cfg)
+                proc = finish_new_page(state, page_state, proc, cfg.dpi)
                 return raw_img, proc
 
             raw_img, processed = await asyncio.to_thread(_gen_page)

@@ -101,6 +101,11 @@ class PageState(BaseModel):
     caption_text: str = ""
     character_ids: list[str] = Field(default_factory=list)
     beat: str = ""
+    # Line-weight metrics of the final page (None until measured).
+    line_main_mm: float | None = None
+    line_detail_mm: float | None = None
+    tiny_regions: int | None = None
+    line_fixed_px: int = 0
     status: PageStatus = "pending"
     error: str | None = None
     seed: int | None = None

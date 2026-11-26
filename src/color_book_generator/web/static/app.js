@@ -47,6 +47,7 @@ const state = {
   lastAutopilotPhase: "",
   reading: null,
   printProfiles: [],
+  lines: null,
 };
 
 async function api(path, options = {}) {
@@ -523,6 +524,7 @@ function renderStage3StoryAndPages() {
           </div>
         </div>
         <p class="page-beat hint hint-sm is-hidden"></p>
+        <p class="page-line hint hint-sm is-hidden"><span class="page-line-text"></span> <button class="btn btn-ghost btn-sm page-thicken-btn is-hidden" type="button">Engrossar traço</button></p>
         <div class="field-row">
           <label class="field-label">
             <span>Título da cena</span>
@@ -575,6 +577,8 @@ function renderStage3StoryAndPages() {
       beatEl.classList.remove("is-hidden");
     }
     updateWordCount(li);
+    li.querySelector(".page-thicken-btn").addEventListener("click", () => thickenLines(page.index));
+    renderPageLine(li);
 
     const thumbImg = li.querySelector(".page-thumb img");
     if (thumbImg) {
@@ -1024,6 +1028,74 @@ const refreshCoverGeometry = debounce(async () => {
   }
 }, 300);
 
+/* ==================== LINE WEIGHT ==================== */
+const LINE_STATUS_LABEL = {
+  ok: "dentro do padrão",
+  thin: "fino para o público",
+  thick: "grosso para o estilo",
+  busy_areas: "muitas áreas pequenas",
+};
+
+function renderPageLine(li) {
+  const el = li.querySelector(".page-line");
+  const index = Number(li.dataset.pageIndex);
+  const status = state.lines?.pages?.find((p) => p.index === index);
+  if (!el || !status || status.status === "unmeasured") {
+    el?.classList.add("is-hidden");
+    return;
+  }
+  const mm = status.main_line_mm != null ? `Traço ${status.main_line_mm} mm` : "Traço";
+  const fixed = status.fixed_px ? " (engrossado)" : "";
+  li.querySelector(".page-line-text").textContent = `${mm}: ${LINE_STATUS_LABEL[status.status] || status.status}${fixed}`;
+  el.classList.toggle("is-warn", status.status !== "ok");
+  el.classList.remove("is-hidden");
+  li.querySelector(".page-thicken-btn").classList.toggle("is-hidden", !status.fixable);
+}
+
+function renderLinesPanel() {
+  const r = state.lines;
+  if (!r) return;
+  const measured = r.pages.length - r.unmeasured;
+  $("#lines-summary").textContent = measured
+    ? `Padrão ${r.label}: traço de ${r.line_min_mm} a ${r.line_max_mm} mm, áreas de pelo menos ${r.min_region_mm} mm. ${measured} página(s) analisada(s).`
+    : "Gere páginas para analisar o traço.";
+  $("#lines-issues").replaceChildren(
+    ...r.warnings.map((msg) => {
+      const item = document.createElement("li");
+      item.textContent = msg;
+      return item;
+    }),
+  );
+  $("#lines-thicken-all").classList.toggle("is-hidden", !r.pages.some((p) => p.fixable));
+  $$("#page-list .page-card").forEach(renderPageLine);
+}
+
+const refreshLines = debounce(async () => {
+  if (!state.sid) return;
+  try {
+    state.lines = await api(`/api/sessions/${state.sid}/lines`);
+    renderLinesPanel();
+  } catch (_) {
+    // Advisory only.
+  }
+}, 400);
+
+async function thickenLines(pageIndex = null) {
+  const query = pageIndex == null ? "" : `?page=${pageIndex}`;
+  try {
+    const res = await api(`/api/sessions/${state.sid}/lines/thicken${query}`, { method: "POST" });
+    state.lines = res.report;
+    await reloadSession();
+    toast(
+      res.pages_fixed.length
+        ? `Traço engrossado em ${plural(res.pages_fixed.length, "página", "páginas")}. Gere o PDF de novo.`
+        : "Nenhuma página precisou (ou pôde) ser engrossada.",
+    );
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
 /* ==================== READING STANDARDS ==================== */
 function countWords(text) {
   return text.replace(/\|/g, " ").split(/\s+/).filter(Boolean).length;
@@ -1087,6 +1159,7 @@ async function reloadSession() {
   state.session = await api(`/api/sessions/${state.sid}`);
   renderAll();
   refreshReading();
+  refreshLines();
 }
 
 async function saveStyleConfig({ silent = false } = {}) {
@@ -2046,6 +2119,17 @@ async function init() {
   setStep(session.current_step ?? 1, { animate: true, persist: false });
   initBriefing({ api, toast, reloadSession, getState: () => state }).catch(() => {});
   refreshReading();
+  refreshLines();
+  $("#lines-thicken-all").addEventListener("click", () => thickenLines());
+  $("#lines-reanalyze").addEventListener("click", async () => {
+    try {
+      state.lines = await api(`/api/sessions/${state.sid}/lines/analyze`, { method: "POST" });
+      renderLinesPanel();
+      toast("Traço reanalisado.");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
   api("/api/print-profiles")
     .then((profiles) => {
       state.printProfiles = profiles;
