@@ -51,6 +51,9 @@ from color_book_generator.web.auth_flow import flow as codex_flow
 from color_book_generator.web.routers.presets import router as presets_router
 from color_book_generator.web.routers.studio import (
     BookCharacterView,
+    ExtraPageView,
+    _extra_page_view,
+    _render_extra_page,
     _style_anchor_view,
     read_upload_limited,
 )
@@ -142,6 +145,7 @@ def _session(sid: str) -> SessionState:
     state = store.load_session(sid)
     if state is None:
         raise HTTPException(status_code=404, detail="session not found")
+    store.migrate_referenced_characters(state)
     return state
 
 
@@ -261,6 +265,7 @@ class SessionCreate(BaseModel):
 class SessionPatch(BaseModel):
     context_prompt: str | None = None
     title: str | None = None
+    author: str | None = None
     provider: str | None = None
     model: str | None = None
     pages: int | None = Field(default=None, ge=1, le=200)
@@ -277,7 +282,11 @@ class SessionPatch(BaseModel):
     include_title_page: bool | None = None
     include_belongs_to_page: bool | None = None
     include_color_test_page: bool | None = None
-    current_step: int | None = Field(default=None, ge=1, le=4)
+    cover_include: bool | None = None
+    cover_color: bool | None = None
+    cover_title: str | None = None
+    cover_prompt: str | None = None
+    current_step: int | None = Field(default=None, ge=1, le=5)
     caption_enabled: bool | None = None
     caption_style: CaptionStyle | None = None
     caption_position: CaptionPosition | None = None
@@ -329,6 +338,7 @@ class PageView(BaseModel):
 class SessionView(BaseModel):
     id: str
     title: str
+    author: str = ""
     context_prompt: str
     provider: str
     model: str
@@ -359,6 +369,16 @@ class SessionView(BaseModel):
     include_title_page: bool = True
     include_belongs_to_page: bool = False
     include_color_test_page: bool = False
+    cover_include: bool = True
+    cover_color: bool = True
+    cover_title: str = ""
+    cover_prompt: str = ""
+    cover_status: str = "pending"
+    cover_error: str | None = None
+    cover_preview_url: str | None = None
+    cover_download_url: str | None = None
+    front_extra_pages: list[ExtraPageView] = Field(default_factory=list)
+    back_extra_pages: list[ExtraPageView] = Field(default_factory=list)
     current_step: int = 1
 
 
@@ -399,6 +419,8 @@ def _session_cfg(state: SessionState) -> BookConfig:
         "include_belongs_to_page": state.include_belongs_to_page,
         "include_color_test_page": state.include_color_test_page,
     }
+    if state.author.strip():
+        updates["author"] = state.author.strip()
     if state.processing is not None:
         updates["processing"] = state.processing
     if state.negative_prompt:
@@ -413,6 +435,7 @@ def _session_view(state: SessionState) -> SessionView:
     return SessionView(
         id=state.id,
         title=state.title,
+        author=state.author,
         context_prompt=state.context_prompt,
         provider=state.provider,
         model=state.model,
@@ -443,6 +466,28 @@ def _session_view(state: SessionState) -> SessionView:
         include_title_page=state.include_title_page,
         include_belongs_to_page=state.include_belongs_to_page,
         include_color_test_page=state.include_color_test_page,
+        cover_include=state.cover_include,
+        cover_color=state.cover_color,
+        cover_title=state.cover_title,
+        cover_prompt=state.cover_prompt,
+        cover_status=state.cover_status,
+        cover_error=state.cover_error,
+        cover_preview_url=(
+            f"/api/sessions/{state.id}/cover/preview?v={int((state.cover_updated_at or state.created_at).timestamp())}"
+            if store.cover_path(state.id).exists()
+            else None
+        ),
+        cover_download_url=(
+            f"/api/sessions/{state.id}/cover/download?v={int((state.cover_updated_at or state.created_at).timestamp())}"
+            if store.cover_path(state.id).exists()
+            else None
+        ),
+        front_extra_pages=[
+            _extra_page_view(state.id, page) for page in state.front_extra_pages
+        ],
+        back_extra_pages=[
+            _extra_page_view(state.id, page) for page in state.back_extra_pages
+        ],
         current_step=state.current_step,
     )
 
@@ -465,6 +510,26 @@ def _session_caption(state: SessionState) -> CaptionConfig:
             "font_size_ratio": state.caption_font_size,
         }
     )
+
+
+def _extra_page_images(
+    state: SessionState, placement: str
+) -> list[Path]:
+    pages = (
+        state.front_extra_pages if placement == "front" else state.back_extra_pages
+    )
+    images: list[Path] = []
+    for page in pages:
+        if not page.include_in_pdf:
+            continue
+        path = store.extra_page_path(state.id, page.id)
+        if not path.exists():
+            _render_extra_page(state, page)
+        images.append(path)
+    return images
+
+
+
 
 
 def _write_page_assets(state: SessionState, page: PageState, img: Image.Image) -> None:
@@ -1032,6 +1097,8 @@ def patch_session(sid: str, body: SessionPatch) -> SessionView:
         state.context_prompt = body.context_prompt.strip()
     if body.title is not None:
         state.title = body.title.strip() or state.title
+    if body.author is not None:
+        state.author = body.author.strip()
     if body.provider is not None:
         state.provider = body.provider
     if body.model is not None:
@@ -1068,6 +1135,16 @@ def patch_session(sid: str, body: SessionPatch) -> SessionView:
     if body.include_color_test_page is not None:
         state.include_color_test_page = body.include_color_test_page
         state.pdf_ready = False
+    if body.cover_include is not None:
+        state.cover_include = body.cover_include
+        state.pdf_ready = False
+    if body.cover_color is not None:
+        state.cover_color = body.cover_color
+        state.pdf_ready = False
+    if body.cover_title is not None:
+        state.cover_title = body.cover_title.strip()
+    if body.cover_prompt is not None:
+        state.cover_prompt = body.cover_prompt
     if body.current_step is not None:
         state.current_step = body.current_step
     if body.caption_enabled is not None:
@@ -1227,6 +1304,7 @@ def compose(sid: str) -> SessionView:
     pages = sorted(store.pages_dir(sid).glob("page-*.png"))
     if not pages:
         raise HTTPException(status_code=400, detail="no generated pages to compose")
+    cover_path = store.cover_path(sid)
     compose_pdf(
         pages,
         store.session_dir(sid) / "book.pdf",
@@ -1235,6 +1313,12 @@ def compose(sid: str) -> SessionView:
         blank_verso=state.blank_verso,
         include_belongs_to_page=state.include_belongs_to_page,
         include_color_test_page=state.include_color_test_page,
+        cover_image=(
+            cover_path if state.cover_include and cover_path.exists() else None
+        ),
+        front_extra_images=_extra_page_images(state, "front"),
+        back_extra_images=_extra_page_images(state, "back"),
+        synopsis=state.story_synopsis,
     )
     state.pdf_ready = True
     store.save_session(state)

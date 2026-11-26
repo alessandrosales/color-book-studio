@@ -1,4 +1,4 @@
-"""4-stage book creation studio endpoints: preset apply, per-book style, character sheets, story scripting."""
+"""5-stage book creation studio: style, characters, story, pages, cover/finalization."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import io
 import re
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -22,8 +23,17 @@ from color_book_generator.config import (
     load_book_config,
 )
 from color_book_generator.layout.pdf import compose_pdf
+from color_book_generator.page_layout import plan_page_layout
 from color_book_generator.presets import get_preset
-from color_book_generator.processing.line_art import prepare_page, to_line_art
+from color_book_generator.processing.caption import (
+    draw_cover_title,
+    render_text_page,
+)
+from color_book_generator.processing.line_art import (
+    fit_color_to_page,
+    prepare_page,
+    to_line_art,
+)
 from color_book_generator.prompts import compose_page_prompt
 from color_book_generator.providers import get_provider
 from color_book_generator.providers.base import generate_matching
@@ -35,8 +45,14 @@ from color_book_generator.story import (
     generate_full_book_blueprint,
     generate_story_plan,
 )
+from color_book_generator.typography import detect_typography
 from color_book_generator.web import store
-from color_book_generator.web.store import BookCharacter, PageState, SessionState
+from color_book_generator.web.store import (
+    BookCharacter,
+    ExtraPage,
+    PageState,
+    SessionState,
+)
 
 router = APIRouter(prefix="/api/sessions/{sid}", tags=["studio"])
 SID_RE = re.compile(r"^[a-f0-9]{8,32}$")
@@ -77,6 +93,7 @@ def _session(sid: str) -> SessionState:
     state = store.load_session(sid)
     if state is None:
         raise HTTPException(status_code=404, detail="session not found")
+    store.migrate_referenced_characters(state)
     return state
 
 
@@ -115,22 +132,143 @@ def _character_view(sid: str, item: BookCharacter) -> BookCharacterView:
 class StyleAnchorView(BaseModel):
     url: str | None
     inherited_global: bool = False
+    font_family: str | None = None
+    font_bold: bool | None = None
+    typography_error: str | None = None
 
 
-def _style_anchor_view(sid: str) -> StyleAnchorView:
+def _style_anchor_view(
+    sid: str, state: SessionState | None = None
+) -> StyleAnchorView:
+    font_family = state.caption_font_family if state is not None else None
+    font_bold = state.caption_font_bold if state is not None else None
     local = store.session_style_path(sid)
     if local.exists():
         return StyleAnchorView(
             url=f"/api/sessions/{sid}/style/image?v={int(local.stat().st_mtime)}",
             inherited_global=False,
+            font_family=font_family,
+            font_bold=font_bold,
         )
     global_path = store.style_path()
     if global_path.exists():
         return StyleAnchorView(
             url=f"/api/style/image?v={int(global_path.stat().st_mtime)}",
             inherited_global=True,
+            font_family=font_family,
+            font_bold=font_bold,
         )
-    return StyleAnchorView(url=None, inherited_global=False)
+    return StyleAnchorView(
+        url=None, inherited_global=False, font_family=font_family, font_bold=font_bold
+    )
+
+
+class ExtraPageView(BaseModel):
+    id: str
+    placement: Literal["front", "back"]
+    title: str
+    text: str
+    prompt: str
+    text_align: Literal["left", "center"]
+    text_vertical: Literal["top", "center", "bottom"]
+    show_border: bool
+    illustration_position: Literal["background", "above", "below", "none"]
+    illustration_size: Literal["small", "medium", "large"]
+    include_in_pdf: bool
+    status: str
+    error: str | None = None
+    updated_at: datetime | None = None
+    preview_url: str | None = None
+    download_url: str | None = None
+
+
+def _extra_page_view(sid: str, page: ExtraPage) -> ExtraPageView:
+    path = store.extra_page_path(sid, page.id)
+    has_image = path.exists()
+    version = int((page.updated_at or datetime.now()).timestamp())
+    return ExtraPageView(
+        id=page.id,
+        placement=page.placement,
+        title=page.title,
+        text=page.text,
+        prompt=page.prompt,
+        text_align=page.text_align,
+        text_vertical=page.text_vertical,
+        show_border=page.show_border,
+        illustration_position=page.illustration_position,
+        illustration_size=page.illustration_size,
+        include_in_pdf=page.include_in_pdf,
+        status=page.status,
+        error=page.error,
+        updated_at=page.updated_at,
+        preview_url=(
+            f"/api/sessions/{sid}/extra-pages/{page.id}/preview?v={version}"
+            if has_image
+            else None
+        ),
+        download_url=(
+            f"/api/sessions/{sid}/extra-pages/{page.id}/download?v={version}"
+            if has_image
+            else None
+        ),
+    )
+
+
+def _find_extra_page(
+    state: SessionState, page_id: str
+) -> tuple[ExtraPage, list[ExtraPage]]:
+    for collection in (state.front_extra_pages, state.back_extra_pages):
+        for page in collection:
+            if page.id == page_id:
+                return page, collection
+    raise HTTPException(status_code=404, detail="pagina extra nao encontrada")
+
+
+def _render_extra_page(state: SessionState, page: ExtraPage) -> None:
+    cfg = _config()
+    background_path = store.extra_page_background_path(state.id, page.id)
+    background = (
+        Image.open(background_path) if background_path.exists() else None
+    )
+    try:
+        image = render_text_page(
+            cfg.image_px,
+            page.title,
+            page.text,
+            _session_caption_cfg(state),
+            background=background,
+            align=page.text_align,
+            vertical=page.text_vertical,
+            show_border=page.show_border,
+            illustration_position=page.illustration_position,
+            illustration_size=page.illustration_size,
+        )
+    finally:
+        if background is not None:
+            background.close()
+    path = store.extra_page_path(state.id, page.id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(path, "PNG", dpi=(cfg.dpi, cfg.dpi))
+    page.status = "done"
+    page.error = None
+    page.updated_at = datetime.now()
+
+
+def _extra_page_images(
+    state: SessionState, placement: Literal["front", "back"]
+) -> list[Path]:
+    pages = (
+        state.front_extra_pages if placement == "front" else state.back_extra_pages
+    )
+    images: list[Path] = []
+    for page in pages:
+        if not page.include_in_pdf:
+            continue
+        path = store.extra_page_path(state.id, page.id)
+        if not path.exists():
+            _render_extra_page(state, page)
+        images.append(path)
+    return images
 
 
 class ApplyPresetRequest(BaseModel):
@@ -169,13 +307,13 @@ def apply_preset(sid: str, body: ApplyPresetRequest) -> dict[str, object]:
 
 @router.get("/style", response_model=StyleAnchorView)
 def get_session_style(sid: str) -> StyleAnchorView:
-    _session(sid)
-    return _style_anchor_view(sid)
+    state = _session(sid)
+    return _style_anchor_view(sid, state)
 
 
 @router.post("/style", response_model=StyleAnchorView)
 async def upload_session_style(sid: str, image: UploadFile = File(...)) -> StyleAnchorView:
-    _session(sid)
+    state = _session(sid)
     data = await read_upload_limited(image)
     if not data:
         raise HTTPException(status_code=400, detail="envie uma imagem")
@@ -187,7 +325,36 @@ async def upload_session_style(sid: str, image: UploadFile = File(...)) -> Style
         raise HTTPException(status_code=400, detail="arquivo nao e uma imagem valida") from exc
     store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
     normalized.save(store.session_style_path(sid), "PNG")
-    return _style_anchor_view(sid)
+    return _style_anchor_view(sid, state)
+
+
+@router.post("/style/detect", response_model=StyleAnchorView)
+async def detect_session_style_typography(sid: str) -> StyleAnchorView:
+    """Read the reference text sample and apply its font to page captions."""
+    state = _session(sid)
+    path = store.session_style_path(sid)
+    if not path.exists():
+        path = store.style_path()
+    if not path.exists():
+        raise HTTPException(
+            status_code=400, detail="envie uma amostra de texto antes de detectar a fonte"
+        )
+    try:
+        detected = await asyncio.to_thread(
+            detect_typography,
+            path.read_bytes(),
+            provider=state.provider,
+            model=state.model,
+        )
+    except Exception as exc:
+        view = _style_anchor_view(sid, state)
+        view.typography_error = str(exc) or "nao foi possivel detectar a fonte"
+        return view
+
+    state.caption_font_family = detected.font_family
+    state.caption_font_bold = detected.bold
+    store.save_session(state)
+    return _style_anchor_view(sid, state)
 
 
 class GenerateStyleRequest(BaseModel):
@@ -229,7 +396,7 @@ async def generate_session_style(sid: str, body: GenerateStyleRequest) -> StyleA
 
     store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
     line_art.save(store.session_style_path(sid), "PNG")
-    return _style_anchor_view(sid)
+    return _style_anchor_view(sid, state)
 
 
 @router.delete("/style", status_code=204)
@@ -245,6 +412,426 @@ def session_style_image(sid: str) -> FileResponse:
     if not path.exists():
         raise HTTPException(status_code=404, detail="estilo do livro nao definido")
     return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+# --- Stage 5: Cover & Extra Text Pages ---
+
+
+class CoverView(BaseModel):
+    status: str
+    error: str | None = None
+    preview_url: str | None = None
+    download_url: str | None = None
+
+
+def _cover_view(state: SessionState) -> CoverView:
+    path = store.cover_path(state.id)
+    has_image = path.exists()
+    version = int((state.cover_updated_at or state.created_at).timestamp())
+    return CoverView(
+        status=state.cover_status,
+        error=state.cover_error,
+        preview_url=(
+            f"/api/sessions/{state.id}/cover/preview?v={version}"
+            if has_image
+            else None
+        ),
+        download_url=(
+            f"/api/sessions/{state.id}/cover/download?v={version}"
+            if has_image
+            else None
+        ),
+    )
+
+
+class CoverGenerateRequest(BaseModel):
+    title: str | None = None
+    prompt: str | None = None
+    color: bool | None = None
+    provider: str | None = None
+    model: str | None = None
+
+
+def _cover_story_memory(state: SessionState) -> str:
+    lines: list[str] = []
+    if state.story_synopsis.strip():
+        lines.append(state.story_synopsis.strip())
+    for page in state.pages:
+        bits = [part for part in (page.title.strip(), page.caption_text.strip()) if part]
+        if bits:
+            lines.append(f"Page {page.index}: " + " — ".join(bits))
+    return "\n".join(lines)
+
+
+def _compose_cover_prompt(
+    state: SessionState, title: str, direction: str, color: bool
+) -> str:
+    memory = _cover_story_memory(state)
+    characters = "; ".join(
+        f"{c.name}: {c.description.strip()}".strip(": ")
+        for c in state.characters
+        if c.name.strip()
+    )
+    parts = [
+        state.context_prompt.strip(),
+        "COVER ART DIRECTION:\n"
+        + (
+            direction.strip()
+            or "Design a captivating, friendly cover that represents the whole story."
+        ),
+        f"BOOK TITLE: {title.strip() or state.title}",
+        "STORY MEMORY (use only as conceptual reference, do not render body text):\n"
+        + memory
+        if memory
+        else "",
+        f"MAIN CHARACTERS: {characters}" if characters else "",
+        (
+            "COVER OVERRIDE: ignore any black-and-white or line-art-only instruction "
+            "from the book context for this cover. Create one single full-page cover "
+            "illustration in FULL COLOR, with a cohesive and inviting palette suitable "
+            "for children. Keep the drawing style and characters consistent with the "
+            "book. Leave the bottom area visually calm so a title band can sit there. "
+            "Do not render the title or any text; the title will be added separately."
+            if color
+            else "Create one single full-page coloring-book cover illustration in "
+            "clean black-and-white line art. Leave the bottom area visually calm so a "
+            "title band can sit there. Do not render the title or any text; the title "
+            "will be added separately. No watermark."
+        ),
+    ]
+    return "\n\n".join(part for part in parts if part)
+
+
+@router.get("/cover", response_model=CoverView)
+def get_cover(sid: str) -> CoverView:
+    state = _session(sid)
+    return _cover_view(state)
+
+
+@router.post("/cover/generate", response_model=CoverView)
+async def generate_cover(sid: str, body: CoverGenerateRequest) -> CoverView:
+    state = _session(sid)
+    cfg = _config()
+    provider_name = body.provider or state.provider
+    model_name = body.model or state.model
+    if provider_name == "codex":
+        model_name = normalize_codex_model(model_name)
+    title = body.title if body.title is not None else state.cover_title or state.title
+    direction = body.prompt if body.prompt is not None else state.cover_prompt
+    color = body.color if body.color is not None else state.cover_color
+    state.cover_title = title.strip()
+    state.cover_prompt = direction.strip()
+    state.cover_color = color
+    prompt = _compose_cover_prompt(state, title, direction, color)
+    negative = (
+        "text, title lettering, watermark, signature, blurry, low quality, "
+        "distorted proportions"
+        if color
+        else (state.negative_prompt or cfg.negative_prompt)
+    )
+    processing = state.processing or cfg.processing
+    caption = _session_caption_cfg(state)
+    style_bytes = store.load_session_style_bytes(sid)
+    refs: list[tuple[str, bytes]] = []
+    for character in state.characters:
+        path = store.session_characters_dir(sid) / character.filename
+        if path.exists():
+            refs.append((character.name, path.read_bytes()))
+
+    def _run() -> Image.Image:
+        provider = get_provider(provider_name, model_name)
+        img = generate_matching(
+            provider,
+            prompt,
+            target_size=cfg.image_px,
+            negative_prompt=negative,
+            references=refs or None,
+            style_reference=style_bytes,
+        )
+        if color:
+            canvas = fit_color_to_page(img, cfg.image_px)
+        else:
+            canvas = prepare_page(img, cfg.image_px, processing)
+        return draw_cover_title(canvas, title, caption)
+
+    state.cover_status = "generating"
+    state.cover_error = None
+    store.save_session(state)
+    try:
+        cover = await asyncio.to_thread(_run)
+    except Exception as exc:
+        state.cover_status = "error"
+        state.cover_error = str(exc)
+        store.save_session(state)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    store.cover_dir(sid).mkdir(parents=True, exist_ok=True)
+    cover.save(store.cover_path(sid), "PNG", dpi=(cfg.dpi, cfg.dpi))
+    state.cover_status = "done"
+    state.cover_error = None
+    state.cover_updated_at = datetime.now()
+    state.pdf_ready = False
+    store.save_session(state)
+    return _cover_view(state)
+
+
+@router.delete("/cover", status_code=204)
+def delete_cover(sid: str) -> None:
+    state = _session(sid)
+    store.cover_path(sid).unlink(missing_ok=True)
+    state.cover_status = "pending"
+    state.cover_error = None
+    state.cover_updated_at = None
+    state.pdf_ready = False
+    store.save_session(state)
+
+
+@router.get("/cover/preview")
+def cover_preview(sid: str) -> FileResponse:
+    _session(sid)
+    path = store.cover_path(sid)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="capa ainda nao gerada")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/cover/download")
+def cover_download(sid: str) -> FileResponse:
+    _session(sid)
+    path = store.cover_path(sid)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="capa ainda nao gerada")
+    return FileResponse(path, media_type="image/png", filename="cover.png")
+
+
+class ExtraPageCreateRequest(BaseModel):
+    placement: Literal["front", "back"] = "front"
+    title: str = ""
+    text: str = ""
+    prompt: str = ""
+    text_align: Literal["left", "center"] = "center"
+    text_vertical: Literal["top", "center", "bottom"] = "center"
+    show_border: bool = False
+    illustration_position: Literal["background", "above", "below", "none"] = "background"
+    illustration_size: Literal["small", "medium", "large"] = "small"
+    include_in_pdf: bool = True
+
+
+class ExtraPageUpdateRequest(BaseModel):
+    placement: Literal["front", "back"] | None = None
+    title: str | None = None
+    text: str | None = None
+    prompt: str | None = None
+    text_align: Literal["left", "center"] | None = None
+    text_vertical: Literal["top", "center", "bottom"] | None = None
+    show_border: bool | None = None
+    illustration_position: Literal["background", "above", "below", "none"] | None = None
+    illustration_size: Literal["small", "medium", "large"] | None = None
+    include_in_pdf: bool | None = None
+
+
+@router.post("/extra-pages", response_model=ExtraPageView, status_code=201)
+def create_extra_page(sid: str, body: ExtraPageCreateRequest) -> ExtraPageView:
+    state = _session(sid)
+    page = ExtraPage(
+        id=store.new_extra_page_id(),
+        placement=body.placement,
+        title=body.title.strip(),
+        text=body.text,
+        prompt=body.prompt,
+        text_align=body.text_align,
+        text_vertical=body.text_vertical,
+        show_border=body.show_border,
+        illustration_position=body.illustration_position,
+        illustration_size=body.illustration_size,
+        include_in_pdf=body.include_in_pdf,
+    )
+    _render_extra_page(state, page)
+    (state.front_extra_pages if page.placement == "front" else state.back_extra_pages).append(
+        page
+    )
+    state.pdf_ready = False
+    store.save_session(state)
+    return _extra_page_view(sid, page)
+
+
+@router.patch("/extra-pages/{page_id}", response_model=ExtraPageView)
+def update_extra_page(
+    sid: str, page_id: str, body: ExtraPageUpdateRequest
+) -> ExtraPageView:
+    state = _session(sid)
+    page, collection = _find_extra_page(state, page_id)
+    if body.title is not None:
+        page.title = body.title.strip()
+    if body.text is not None:
+        page.text = body.text
+    if body.prompt is not None:
+        page.prompt = body.prompt
+    if body.text_align is not None:
+        page.text_align = body.text_align
+    if body.text_vertical is not None:
+        page.text_vertical = body.text_vertical
+    if body.show_border is not None:
+        page.show_border = body.show_border
+    if body.illustration_position is not None:
+        page.illustration_position = body.illustration_position
+    if body.illustration_size is not None:
+        page.illustration_size = body.illustration_size
+    if body.include_in_pdf is not None:
+        page.include_in_pdf = body.include_in_pdf
+    if body.placement is not None and body.placement != page.placement:
+        collection.remove(page)
+        page.placement = body.placement
+        target = (
+            state.front_extra_pages
+            if page.placement == "front"
+            else state.back_extra_pages
+        )
+        target.append(page)
+    _render_extra_page(state, page)
+    state.pdf_ready = False
+    store.save_session(state)
+    return _extra_page_view(sid, page)
+
+
+class ExtraPageVisualRequest(BaseModel):
+    provider: str | None = None
+    model: str | None = None
+
+
+@router.post("/extra-pages/{page_id}/visual", response_model=ExtraPageView)
+async def generate_extra_page_visual(
+    sid: str, page_id: str, body: ExtraPageVisualRequest
+) -> ExtraPageView:
+    state = _session(sid)
+    page, _collection = _find_extra_page(state, page_id)
+    if not page.prompt.strip():
+        raise HTTPException(
+            status_code=400, detail="informe um prompt para gerar esta pagina"
+        )
+    cfg = _config()
+    provider_name = body.provider or state.provider
+    model_name = body.model or state.model
+    if provider_name == "codex":
+        model_name = normalize_codex_model(model_name)
+    processing = state.processing or cfg.processing
+    style_bytes = store.load_session_style_bytes(sid)
+    refs: list[tuple[str, bytes]] = []
+    for character in state.characters:
+        path = store.session_characters_dir(sid) / character.filename
+        if path.exists():
+            refs.append((character.name, path.read_bytes()))
+
+    page.status = "generating"
+    page.error = None
+    store.save_session(state)
+    try:
+        layout = await asyncio.to_thread(
+            plan_page_layout,
+            page_prompt=page.prompt,
+            title=page.title,
+            text=page.text,
+            provider=state.provider,
+            model=state.model,
+        )
+    except Exception as exc:
+        page.status = "error"
+        page.error = f"nao foi possivel interpretar o prompt da pagina: {exc}"
+        store.save_session(state)
+        raise HTTPException(status_code=400, detail=page.error) from exc
+
+    page.text_align = layout.text_align
+    page.text_vertical = layout.text_vertical
+    page.show_border = layout.show_border
+    page.illustration_position = layout.image_position
+    page.illustration_size = layout.image_size
+
+    background_path = store.extra_page_background_path(sid, page.id)
+    if layout.image_position == "none":
+        background_path.unlink(missing_ok=True)
+        _render_extra_page(state, page)
+        state.pdf_ready = False
+        store.save_session(state)
+        return _extra_page_view(sid, page)
+
+    art_subject = layout.image_prompt.strip() or page.prompt.strip()
+    art_instruction = (
+        "Create a decorative black-and-white line-art frame or background for a "
+        "text page of this book. Keep the central area mostly clear/white so the "
+        "text block remains readable."
+        if layout.image_position == "background"
+        else "Create one single isolated black-and-white line-art illustration. "
+        "Show the full subject centered on a pure white background, with no frame, "
+        "no border and no background scenery."
+    )
+    prompt = "\n\n".join(
+        part
+        for part in [
+            state.context_prompt.strip(),
+            "INTERIOR TEXT PAGE ART DIRECTION:\n" + art_subject,
+            f"PAGE TITLE CONTEXT: {page.title.strip()}" if page.title.strip() else "",
+            art_instruction
+            + " Do not render any text, letters, numbers, or watermarks.",
+        ]
+        if part
+    )
+    negative = state.negative_prompt or cfg.negative_prompt
+
+    def _run() -> Image.Image:
+        provider = get_provider(provider_name, model_name)
+        img = generate_matching(
+            provider,
+            prompt,
+            target_size=cfg.image_px,
+            negative_prompt=negative,
+            references=refs or None,
+            style_reference=style_bytes,
+        )
+        return prepare_page(img, cfg.image_px, processing)
+
+    try:
+        background = await asyncio.to_thread(_run)
+    except Exception as exc:
+        page.status = "error"
+        page.error = str(exc)
+        store.save_session(state)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    background_path.parent.mkdir(parents=True, exist_ok=True)
+    background.save(background_path, "PNG", dpi=(cfg.dpi, cfg.dpi))
+    _render_extra_page(state, page)
+    state.pdf_ready = False
+    store.save_session(state)
+    return _extra_page_view(sid, page)
+
+
+@router.delete("/extra-pages/{page_id}", status_code=204)
+def delete_extra_page(sid: str, page_id: str) -> None:
+    state = _session(sid)
+    page, collection = _find_extra_page(state, page_id)
+    collection.remove(page)
+    store.extra_page_path(sid, page.id).unlink(missing_ok=True)
+    store.extra_page_background_path(sid, page.id).unlink(missing_ok=True)
+    state.pdf_ready = False
+    store.save_session(state)
+
+
+@router.get("/extra-pages/{page_id}/preview")
+def extra_page_preview(sid: str, page_id: str) -> FileResponse:
+    _session(sid)
+    path = store.extra_page_path(sid, page_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="pagina extra sem preview")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/extra-pages/{page_id}/download")
+def extra_page_download(sid: str, page_id: str) -> FileResponse:
+    _session(sid)
+    path = store.extra_page_path(sid, page_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="pagina extra sem preview")
+    return FileResponse(path, media_type="image/png", filename=f"extra-{page_id}.png")
 
 
 # --- Stage 2: Per-book Character Sheets ---
@@ -962,6 +1549,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
         )
         page_files = sorted(store.pages_dir(sid).glob("page-*.png"))
         if page_files:
+            cover_path = store.cover_path(sid)
             await asyncio.to_thread(
                 compose_pdf,
                 page_files,
@@ -971,6 +1559,12 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 blank_verso=state.blank_verso,
                 include_belongs_to_page=state.include_belongs_to_page,
                 include_color_test_page=state.include_color_test_page,
+                cover_image=(
+                    cover_path if state.cover_include and cover_path.exists() else None
+                ),
+                front_extra_images=_extra_page_images(state, "front"),
+                back_extra_images=_extra_page_images(state, "back"),
+                synopsis=state.story_synopsis,
             )
             state.pdf_ready = True
             store.save_session(state)
@@ -981,7 +1575,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             phase="done",
             label="Livro completo gerado com sucesso! PDF KDP pronto.",
             percent=100,
-            current_step=4,
+            current_step=5,
         )
     except Exception as exc:
         _set_autopilot(

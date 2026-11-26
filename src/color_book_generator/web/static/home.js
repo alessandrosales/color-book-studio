@@ -395,7 +395,7 @@ async function importBackup() {
   try {
     const res = await api("/api/import", { method: "POST", body: form });
     fill.style.width = "100%";
-    toast(`Backup restaurado: ${res.sessions} livro(s), ${res.pages} página(s).`);
+    toast(`Backup restaurado: ${res.sessions} livro(s), ${res.pages} página(s) ilustradas, ${res.extra_pages || 0} página(s) extra.`);
     input.value = "";
     $("#backup-modal")?.classList.add("is-hidden");
     await Promise.all([loadBooks(), loadPresets()]);

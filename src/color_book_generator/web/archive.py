@@ -46,6 +46,8 @@ def book_config_path() -> Path:
 class ImportResult(BaseModel):
     sessions: int
     pages: int
+    extra_pages: int = 0
+    covers: int = 0
     characters: int
     style: bool
     latest_session: str | None = None
@@ -95,6 +97,8 @@ def export_selected_archive(destination: Path, session_ids: list[str]) -> Path:
     root = store.WEB_ROOT
     files = 0
     referenced_global_cids: set[str] = set()
+    referenced_preset_ids: set[str] = set()
+    needs_global_style = False
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for sid in unique_ids:
             sdir = store.session_dir(sid)
@@ -107,6 +111,10 @@ def export_selected_archive(destination: Path, session_ids: list[str]) -> Path:
                     for cid in page.character_ids:
                         if cid not in local_cids:
                             referenced_global_cids.add(cid)
+                if state.preset_id:
+                    referenced_preset_ids.add(state.preset_id)
+            if not (sdir / "style" / "reference.png").exists():
+                needs_global_style = True
             for path in sorted(sdir.rglob("*")):
                 if not path.is_file():
                     continue
@@ -129,6 +137,28 @@ def export_selected_archive(destination: Path, session_ids: list[str]) -> Path:
                     if cpath.exists():
                         zf.write(cpath, f"data/characters/{rec.filename}")
                         files += 1
+
+        if needs_global_style:
+            global_style = store.style_path()
+            if global_style.exists():
+                zf.write(global_style, "data/style/reference.png")
+                files += 1
+
+        if referenced_preset_ids:
+            custom_presets = [
+                preset
+                for preset in store.load_custom_presets()
+                if preset.id in referenced_preset_ids
+            ]
+            if custom_presets:
+                zf.writestr(
+                    "data/presets.json",
+                    json.dumps(
+                        [preset.model_dump(mode="json") for preset in custom_presets],
+                        indent=2,
+                    ),
+                )
+                files += 1
 
         config = book_config_path()
         if config.exists():
@@ -331,6 +361,54 @@ def _is_test_session(state: store.SessionState) -> bool:
     return state.provider == "fake" or state.model == "fake-1"
 
 
+def _validate_image(path: Path, label: str) -> None:
+    if not path.exists() or path.stat().st_size == 0:
+        raise ArchiveError(f"arquivo ausente no backup: {label}")
+    try:
+        with Image.open(path) as img:
+            img.verify()
+    except Exception as exc:
+        raise ArchiveError(f"imagem invalida no backup: {label}") from exc
+
+
+def _validate_session_assets(state: store.SessionState, directory: Path) -> None:
+    for page in state.pages:
+        if page.status == "done":
+            _validate_image(
+                directory / "pages" / f"page-{page.index:03d}.png",
+                f"{state.id}/pages/page-{page.index:03d}.png",
+            )
+    for character in state.characters:
+        if character.approved or character.sheet_status == "ready":
+            _validate_image(
+                directory / "characters" / character.filename,
+                f"{state.id}/characters/{character.filename}",
+            )
+    style_reference = directory / "style" / "reference.png"
+    if style_reference.exists():
+        _validate_image(style_reference, f"{state.id}/style/reference.png")
+    if state.cover_status == "done":
+        _validate_image(
+            directory / "cover" / "cover.png",
+            f"{state.id}/cover/cover.png",
+        )
+    seen_extra_ids: set[str] = set()
+    for extra in [*state.front_extra_pages, *state.back_extra_pages]:
+        if extra.id in seen_extra_ids:
+            raise ArchiveError(f"pagina extra duplicada no backup: {extra.id}")
+        seen_extra_ids.add(extra.id)
+        if extra.status == "done":
+            _validate_image(
+                directory / "extras" / f"extra-{extra.id}.png",
+                f"{state.id}/extras/extra-{extra.id}.png",
+            )
+        background = directory / "extras" / f"extra-{extra.id}-background.png"
+        if background.exists():
+            _validate_image(
+                background, f"{state.id}/extras/{background.name}"
+            )
+
+
 def _load_sessions(
     source: Path,
 ) -> tuple[list[tuple[store.SessionState, Path]], int]:
@@ -355,6 +433,7 @@ def _load_sessions(
         if SKIP_FAKE_SESSIONS and _is_test_session(state):
             skipped += 1
             continue
+        _validate_session_assets(state, directory)
         sessions.append((state, directory))
     return sessions, skipped
 
@@ -364,11 +443,25 @@ def session_activity(state: store.SessionState) -> datetime:
     stamps.extend(
         page.updated_at for page in state.pages if page.updated_at is not None
     )
+    stamps.extend(
+        extra.updated_at
+        for extra in [*state.front_extra_pages, *state.back_extra_pages]
+        if extra.updated_at is not None
+    )
+    if state.cover_updated_at is not None:
+        stamps.append(state.cover_updated_at)
     return max(stamps)
 
 
 def _session_rank(state: store.SessionState) -> tuple[bool, datetime]:
-    has_images = any(page.status == "done" for page in state.pages)
+    has_images = (
+        any(page.status == "done" for page in state.pages)
+        or state.cover_status == "done"
+        or any(
+            extra.status == "done"
+            for extra in [*state.front_extra_pages, *state.back_extra_pages]
+        )
+    )
     return (has_images, session_activity(state))
 
 
@@ -389,6 +482,11 @@ def _merge_sessions(
         store.save_session(state)
         result.sessions += 1
         result.pages += len(state.pages)
+        result.extra_pages += len(state.front_extra_pages) + len(
+            state.back_extra_pages
+        )
+        if state.cover_status == "done":
+            result.covers += 1
         result.session_ids.append(state.id)
         rank = _session_rank(state)
         if best_rank is None or rank > best_rank:

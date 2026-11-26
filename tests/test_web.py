@@ -440,6 +440,25 @@ def test_export_import_roundtrip(monkeypatch, tmp_path) -> None:
         f"/api/sessions/{sid}/pages/1/generate", json={"provider": "fake"}
     )
     assert gen.json()["status"] == "done"
+    cover = client.post(
+        f"/api/sessions/{sid}/cover/generate",
+        json={"title": "Backup Book", "prompt": "Lumi no vale"},
+    )
+    assert cover.status_code == 200, cover.text
+    extra = client.post(
+        f"/api/sessions/{sid}/extra-pages",
+        json={
+            "placement": "front",
+            "title": "Welcome",
+            "text": "A short introduction.",
+            "prompt": "Lumi acima do texto",
+        },
+    )
+    assert extra.status_code == 201, extra.text
+    extra_id = extra.json()["id"]
+    background = store.extra_page_background_path(sid, extra_id)
+    background.parent.mkdir(parents=True, exist_ok=True)
+    background.write_bytes(_png_bytes())
     client.put(
         "/api/settings",
         json={
@@ -472,6 +491,8 @@ def test_export_import_roundtrip(monkeypatch, tmp_path) -> None:
     body = imported.json()
     assert body["sessions"] == 1
     assert body["pages"] == 2
+    assert body["extra_pages"] == 1
+    assert body["covers"] == 1
     assert body["characters"] == 1
     assert body["style"] is True
     assert body["latest_session"] == sid
@@ -488,6 +509,15 @@ def test_export_import_roundtrip(monkeypatch, tmp_path) -> None:
     page = restored["pages"][0]
     assert page["status"] == "done"
     assert client.get(page["view_url"]).status_code == 200
+    assert restored["cover_status"] == "done"
+    assert client.get(restored["cover_preview_url"]).status_code == 200
+    assert store.cover_path(sid).exists()
+    assert len(restored["front_extra_pages"]) == 1
+    restored_extra = restored["front_extra_pages"][0]
+    assert restored_extra["prompt"] == "Lumi acima do texto"
+    assert client.get(restored_extra["preview_url"]).status_code == 200
+    assert store.extra_page_path(sid, restored_extra["id"]).exists()
+    assert store.extra_page_background_path(sid, restored_extra["id"]).exists()
 
     restored_config = tmp_path / "restored-config.yaml"
     monkeypatch.setattr(backup_archive, "book_config_path", lambda: restored_config)
@@ -733,3 +763,71 @@ def test_import_creates_copy_when_book_exists(monkeypatch) -> None:
     assert copy.json()["title"] == "Dup"
     assert copy.json()["pages"][0]["status"] == "done"
     assert client.get(copy.json()["pages"][0]["view_url"]).status_code == 200
+
+
+def _zip_without(archive_bytes: bytes, drop_suffixes: tuple[str, ...]) -> bytes:
+    import io
+    import zipfile
+
+    source = zipfile.ZipFile(io.BytesIO(archive_bytes))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as target:
+        for info in source.infolist():
+            if any(info.filename.endswith(suffix) for suffix in drop_suffixes):
+                continue
+            target.writestr(info, source.read(info.filename))
+    return out.getvalue()
+
+
+def test_import_rejects_missing_cover_image(monkeypatch, tmp_path) -> None:
+    from color_book_generator.web import archive as backup_archive
+
+    monkeypatch.setattr(backup_archive, "SKIP_FAKE_SESSIONS", False)
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    sid = session["id"]
+    cover = client.post(
+        f"/api/sessions/{sid}/cover/generate", json={"title": "Capa", "prompt": "Lumi"}
+    )
+    assert cover.status_code == 200, cover.text
+    archive_bytes = client.get("/api/export").content
+    broken = _zip_without(archive_bytes, (f"data/{sid}/cover/cover.png",))
+
+    monkeypatch.setattr(store, "WEB_ROOT", tmp_path / "restored")
+    res = client.post(
+        "/api/import",
+        files={"archive": ("broken.zip", broken, "application/zip")},
+    )
+    assert res.status_code == 400
+    assert "cover" in res.json()["detail"]
+    assert not store.session_dir(sid).exists()
+
+
+def test_import_rejects_missing_extra_page_image(monkeypatch, tmp_path) -> None:
+    from color_book_generator.web import archive as backup_archive
+
+    monkeypatch.setattr(backup_archive, "SKIP_FAKE_SESSIONS", False)
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    sid = session["id"]
+    extra = client.post(
+        f"/api/sessions/{sid}/extra-pages",
+        json={"placement": "back", "title": "Fim", "text": "Até logo"},
+    )
+    assert extra.status_code == 201, extra.text
+    extra_id = extra.json()["id"]
+    archive_bytes = client.get("/api/export").content
+    broken = _zip_without(
+        archive_bytes, (f"data/{sid}/extras/extra-{extra_id}.png",)
+    )
+
+    monkeypatch.setattr(store, "WEB_ROOT", tmp_path / "restored")
+    res = client.post(
+        "/api/import",
+        files={"archive": ("broken.zip", broken, "application/zip")},
+    )
+    assert res.status_code == 400
+    assert "extra" in res.json()["detail"]
+    assert not store.session_dir(sid).exists()

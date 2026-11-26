@@ -67,8 +67,15 @@
           <button class="step-tab" type="button" data-step="4">
             <span class="step-num">4</span>
             <span class="step-text">
-              <span class="step-title">Páginas &amp; PDF KDP</span>
+              <span class="step-title">Páginas ilustradas</span>
               <span class="step-sub" id="step-4-sub">0 / 0 prontas</span>
+            </span>
+          </button>
+          <button class="step-tab" type="button" data-step="5">
+            <span class="step-num">5</span>
+            <span class="step-text">
+              <span class="step-title">Capa &amp; finalização</span>
+              <span class="step-sub" id="step-5-sub">Capa e PDF</span>
             </span>
           </button>
         </div>
@@ -114,10 +121,10 @@
 
           <div id="studio-style-picker"></div>
 
-          <div class="stage-split">
+          <div class="stage-split" style="align-items: stretch;">
             <div class="floating-card">
               <h3>Configuração do livro</h3>
-              <label class="field-label">
+              <label class="field-label field-grow">
                 <span>Prompt de estilo</span>
                 <textarea id="context" class="field" rows="5" spellcheck="false"></textarea>
               </label>
@@ -180,22 +187,82 @@
             </div>
 
             <div class="floating-card">
-              <h3>Referência de estilo</h3>
+              <h3>Referência de texto (fonte)</h3>
               <p class="hint" style="font-size: 0.84rem;">
-                Usada como referência visual em todas as gerações deste livro.
+                Envie uma imagem com uma amostra de texto. A fonte escolhida aqui é aplicada nas
+                legendas e balões das páginas geradas.
               </p>
               <div class="anchor-preview" id="style-preview">
-                <span>Nenhuma referência definida.</span>
+                <span>Nenhuma amostra de texto definida.</span>
               </div>
-              <label class="field-label">
-                <span>Cena de teste</span>
-                <input id="style-sample-subject" class="field" type="text" placeholder="Ex: casinha acolhedora com gato na janela" />
+              <p class="hint" id="style-typography-status" style="font-size: 0.82rem; margin: 0;">
+                Fonte aplicada: Sans · Normal
+              </p>
+              <label class="check-toggle">
+                <input type="checkbox" id="caption-enabled" />
+                <span>Exibir legenda ou balão de fala</span>
               </label>
-              <button class="btn btn-accent btn-block btn-sm" id="style-generate-btn" type="button">Gerar referência de estilo</button>
+              <div id="caption-options" style="display: flex; flex-direction: column; gap: 12px;">
+                <div class="field-row">
+                  <label class="field-label">
+                    <span>Estilo</span>
+                    <select id="caption-style" class="field">
+                      <option value="balloon">Balão de fala</option>
+                      <option value="caption">Legenda</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    <span>Posição</span>
+                    <select id="caption-position" class="field">
+                      <option value="bottom">Base</option>
+                      <option value="top">Topo</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="field-row">
+                  <label class="field-label">
+                    <span>Fonte</span>
+                    <select id="caption-font" class="field">
+                      <option value="sans">Sans</option>
+                      <option value="serif">Serif</option>
+                      <option value="mono">Mono</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    <span>Peso</span>
+                    <select id="caption-weight" class="field">
+                      <option value="normal">Normal</option>
+                      <option value="bold">Negrito</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    <span>Tamanho</span>
+                    <select id="caption-size" class="field">
+                      <option value="0.024">Pequeno</option>
+                      <option value="0.032">Médio</option>
+                      <option value="0.04">Grande</option>
+                      <option value="0.048">Extra</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
               <div class="field-row" style="grid-template-columns: 1fr auto;">
                 <input id="style-file" class="field" style="padding: 7px 10px; font-size: 0.82rem;" type="file" accept="image/*" />
                 <button class="btn btn-outline btn-sm" id="style-upload" type="button">Enviar</button>
               </div>
+              <button class="btn btn-outline btn-sm is-hidden" id="style-detect-btn" type="button">
+                Detectar fonte da imagem
+              </button>
+              <details style="margin-top: 6px;">
+                <summary class="hint" style="cursor: pointer; font-size: 0.82rem;">
+                  Amostra visual de traço (opcional)
+                </summary>
+                <label class="field-label" style="margin-top: 8px;">
+                  <span>Cena de teste</span>
+                  <input id="style-sample-subject" class="field" type="text" placeholder="Ex: casinha acolhedora com gato na janela" />
+                </label>
+                <button class="btn btn-accent btn-block btn-sm" id="style-generate-btn" type="button">Gerar amostra visual</button>
+              </details>
               <button class="btn btn-danger-ghost btn-sm is-hidden" id="style-remove" type="button">Remover referência</button>
               <p class="error-msg is-hidden" id="style-error"></p>
             </div>
@@ -279,7 +346,7 @@
             </div>
           </div>
 
-          <div class="stage-split">
+          <div class="stage-split" style="grid-template-columns: 1fr;">
             <div class="floating-card">
               <h3>Gerar roteiro</h3>
               <label class="field-label">
@@ -302,67 +369,11 @@
                 </label>
               </div>
 
-              <div class="topbar-actions">
-                <button class="btn btn-accent btn-sm" id="story-generate-btn" type="button">Gerar roteiro</button>
-                <button class="btn btn-outline btn-sm" id="story-save-btn" type="button">Salvar sinopse</button>
-              </div>
               <p class="error-msg is-hidden" id="story-error"></p>
 
-              <label class="field-label">
-                <span>Sinopse</span>
-                <textarea id="story-synopsis" class="field" rows="3" placeholder="Resumo do livro"></textarea>
-              </label>
-            </div>
-
-            <div class="floating-card">
-              <h3>Texto nas páginas</h3>
-              <label class="check-toggle">
-                <input type="checkbox" id="caption-enabled" />
-                <span>Exibir legenda ou balão de fala</span>
-              </label>
-              <div id="caption-options" style="display: flex; flex-direction: column; gap: 12px;">
-                <div class="field-row">
-                  <label class="field-label">
-                    <span>Estilo</span>
-                    <select id="caption-style" class="field">
-                      <option value="balloon">Balão de fala</option>
-                      <option value="caption">Legenda</option>
-                    </select>
-                  </label>
-                  <label class="field-label">
-                    <span>Posição</span>
-                    <select id="caption-position" class="field">
-                      <option value="bottom">Base</option>
-                      <option value="top">Topo</option>
-                    </select>
-                  </label>
-                </div>
-                <div class="field-row">
-                  <label class="field-label">
-                    <span>Fonte</span>
-                    <select id="caption-font" class="field">
-                      <option value="sans">Sans</option>
-                      <option value="serif">Serif</option>
-                      <option value="mono">Mono</option>
-                    </select>
-                  </label>
-                  <label class="field-label">
-                    <span>Peso</span>
-                    <select id="caption-weight" class="field">
-                      <option value="normal">Normal</option>
-                      <option value="bold">Negrito</option>
-                    </select>
-                  </label>
-                  <label class="field-label">
-                    <span>Tamanho</span>
-                    <select id="caption-size" class="field">
-                      <option value="0.024">Pequeno</option>
-                      <option value="0.032">Médio</option>
-                      <option value="0.04">Grande</option>
-                      <option value="0.048">Extra</option>
-                    </select>
-                  </label>
-                </div>
+              <div class="topbar-actions">
+                <button class="btn btn-accent btn-sm" id="story-generate-btn" type="button">Gerar roteiro</button>
+                <button class="btn btn-outline btn-sm" id="story-save-btn" type="button">Salvar roteiro</button>
               </div>
             </div>
           </div>
@@ -383,13 +394,13 @@
           </div>
         </section>
 
-        <!-- ==================== STAGE 4: PÁGINAS & PDF KDP ==================== -->
+        <!-- ==================== STAGE 4: ILLUSTRATED PAGES ==================== -->
         <section class="stage-panel is-hidden" id="stage-4" data-stage="4">
           <div class="stage-head">
             <div class="stage-head-left">
               <div class="stage-title-row">
                 <span class="stage-big-num">4.</span>
-                <h1>Páginas e PDF</h1>
+                <h1>Páginas ilustradas</h1>
               </div>
               <p class="hint" id="pages-subtitle">
                 Gere páginas individualmente ou em fila usando o estilo e os personagens aprovados.
@@ -398,6 +409,31 @@
             <div class="topbar-actions">
               <span class="pill" id="progress-pill">0 / 0 prontas</span>
               <button class="btn btn-accent btn-sm" id="generate-pending" type="button">Gerar pendentes</button>
+            </div>
+          </div>
+
+          <ul class="page-list" id="page-list"></ul>
+
+          <div class="stage-footer">
+            <button class="btn btn-outline btn-sm" type="button" data-goto-step="3">Voltar para roteiro</button>
+            <button class="btn btn-primary btn-sm" type="button" data-goto-step="5">Ir para finalização</button>
+          </div>
+        </section>
+
+        <!-- ==================== STAGE 5: COVER, EXTRAS & PDF ==================== -->
+        <section class="stage-panel is-hidden" id="stage-5" data-stage="5">
+          <div class="stage-head">
+            <div class="stage-head-left">
+              <div class="stage-title-row">
+                <span class="stage-big-num">5.</span>
+                <h1>Capa, páginas extras e PDF</h1>
+              </div>
+              <p class="hint">
+                Crie a capa, adicione páginas de texto antes ou depois dos desenhos e finalize o PDF para impressão.
+              </p>
+            </div>
+            <div class="topbar-actions">
+              <span class="pill" id="pdf-final-status">PDF não gerado</span>
             </div>
           </div>
 
@@ -421,15 +457,100 @@
               </label>
             </div>
             <div class="topbar-actions">
-              <button class="btn btn-primary btn-sm" id="compose-btn-stage" type="button" disabled>Gerar PDF</button>
-              <a class="btn btn-outline btn-sm is-hidden" id="pdf-link-stage" href="#" target="_blank" rel="noopener">Abrir PDF</a>
+              <button class="btn btn-primary btn-sm" id="compose-final-btn" type="button" disabled>
+                Gerar PDF final
+              </button>
+              <a class="btn btn-outline btn-sm is-hidden" id="pdf-final-link" href="#" target="_blank" rel="noopener">
+                Abrir PDF
+              </a>
+            </div>
+          </div>
+          <p class="error-msg is-hidden" id="pdf-final-error"></p>
+
+          <div class="floating-card">
+            <h3>Folha de rosto</h3>
+            <p class="hint" style="font-size: 0.84rem;">
+              O autor e a sinopse são impressos na folha de rosto quando ela estiver incluída no PDF.
+            </p>
+            <label class="field-label">
+              <span>Autor</span>
+              <input id="book-author" class="field" type="text" placeholder="Nome do autor" />
+            </label>
+            <label class="field-label">
+              <span>Sinopse</span>
+              <textarea id="story-synopsis" class="field" rows="4" placeholder="Resumo do livro"></textarea>
+            </label>
+            <div class="topbar-actions">
+              <button class="btn btn-outline btn-sm" id="save-book-info-btn" type="button">Salvar informações</button>
+            </div>
+            <p class="error-msg is-hidden" id="book-info-error"></p>
+          </div>
+
+          <div class="floating-card">
+            <h3>Capa do livro</h3>
+            <p class="hint" style="font-size: 0.84rem;">
+              A capa usa o contexto do livro, o roteiro completo e as imagens de referência como memória conceitual.
+              O título é aplicado sobre uma faixa na base da capa.
+            </p>
+            <div class="cover-split">
+              <div class="cover-fields">
+                <label class="check-toggle">
+                  <input type="checkbox" id="cover-include" />
+                  <span>Incluir capa no PDF</span>
+                </label>
+                <label class="check-toggle">
+                  <input type="checkbox" id="cover-color" />
+                  <span>Capa colorida</span>
+                </label>
+                <label class="field-label">
+                  <span>Título da capa</span>
+                  <input id="cover-title" class="field" type="text" placeholder="Usa o título do livro se vazio" />
+                </label>
+                <label class="field-label">
+                  <span>Direção de arte da capa</span>
+                  <textarea id="cover-prompt" class="field" rows="5" placeholder="Ex: Lumi voando sobre o vale ao amanhecer, com o arco-íris ao fundo e os amigos observando."></textarea>
+                </label>
+                <div class="topbar-actions">
+                  <button class="btn btn-accent btn-sm" id="cover-generate-btn" type="button">Gerar capa</button>
+                  <a class="btn btn-ghost btn-sm is-hidden" id="cover-download" href="#" download>PNG da capa</a>
+                  <button class="btn btn-danger-ghost btn-sm is-hidden" id="cover-remove-btn" type="button">Remover capa</button>
+                </div>
+                <p class="error-msg is-hidden" id="cover-error"></p>
+              </div>
+              <div class="cover-art">
+                <div class="anchor-preview" id="cover-preview">
+                  <span>Nenhuma capa gerada ainda.</span>
+                </div>
+              </div>
             </div>
           </div>
 
-          <ul class="page-list" id="page-list"></ul>
+          <div class="floating-card">
+            <div class="section-header" style="margin-bottom: 0;">
+              <div>
+                <h2 style="font-size: 1.12rem;">Páginas iniciais</h2>
+                <p class="hint" style="font-size: 0.84rem;">Páginas de texto exibidas depois da capa e antes dos desenhos.</p>
+              </div>
+              <button class="btn btn-outline btn-sm" id="add-front-extra-btn" type="button">Adicionar página inicial</button>
+            </div>
+            <div class="extra-page-list" id="front-extra-list"></div>
+            <p class="empty-state is-hidden" id="front-extra-empty">Nenhuma página inicial adicionada.</p>
+          </div>
+
+          <div class="floating-card">
+            <div class="section-header" style="margin-bottom: 0;">
+              <div>
+                <h2 style="font-size: 1.12rem;">Páginas finais</h2>
+                <p class="hint" style="font-size: 0.84rem;">Páginas de texto exibidas depois dos desenhos.</p>
+              </div>
+              <button class="btn btn-outline btn-sm" id="add-back-extra-btn" type="button">Adicionar página final</button>
+            </div>
+            <div class="extra-page-list" id="back-extra-list"></div>
+            <p class="empty-state is-hidden" id="back-extra-empty">Nenhuma página final adicionada.</p>
+          </div>
 
           <div class="stage-footer">
-            <button class="btn btn-outline btn-sm" type="button" data-goto-step="3">Voltar para roteiro</button>
+            <button class="btn btn-outline btn-sm" type="button" data-goto-step="4">Voltar para páginas</button>
             <a class="btn btn-outline btn-sm" href="/">Voltar para biblioteca</a>
           </div>
         </section>

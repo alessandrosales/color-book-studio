@@ -52,7 +52,7 @@ def _wrap_pdf_lines(
     return lines
 
 
-def _draw_title_page(c: canvas.Canvas, cfg: BookConfig) -> None:
+def _draw_title_page(c: canvas.Canvas, cfg: BookConfig, synopsis: str = "") -> None:
     page_w, page_h = _page_dimensions_pt(cfg)
     c.setFillColorRGB(0, 0, 0)
     c.setStrokeColorRGB(0, 0, 0)
@@ -74,14 +74,40 @@ def _draw_title_page(c: canvas.Canvas, cfg: BookConfig) -> None:
     for i, line in enumerate(lines):
         c.drawCentredString(page_w / 2, start_y - i * line_h, line)
 
+    text_bottom = start_y - len(lines) * line_h
     if cfg.subtitle:
-        sub_y = start_y - len(lines) * line_h - 10.0
+        sub_y = text_bottom - 10.0
         c.setFont("Helvetica", 14)
-        for j, sline in enumerate(_wrap_pdf_lines(c, cfg.subtitle, "Helvetica", 14, max_w)):
+        sub_lines = _wrap_pdf_lines(c, cfg.subtitle, "Helvetica", 14, max_w)
+        for j, sline in enumerate(sub_lines):
             c.drawCentredString(page_w / 2, sub_y - j * 18.0, sline)
+        text_bottom = sub_y - len(sub_lines) * 18.0
+
+    author_y = page_h * 0.14
+    clean_synopsis = synopsis.strip()
+    if clean_synopsis:
+        syn_max_w = page_w - 2 * inset - 1.2 * inch
+        syn_size = 11.0
+        syn_lines = _wrap_pdf_lines(c, clean_synopsis, "Helvetica", syn_size, syn_max_w)
+        syn_line_h = 14.0
+        syn_top = text_bottom - 26.0
+        available = syn_top - (author_y + 26.0)
+        while syn_lines and len(syn_lines) * syn_line_h > available and syn_size > 9.0:
+            syn_size -= 0.5
+            syn_line_h = syn_size * 1.3
+            syn_lines = _wrap_pdf_lines(c, clean_synopsis, "Helvetica", syn_size, syn_max_w)
+        max_lines = max(1, int(available // syn_line_h)) if available > 0 else 0
+        if len(syn_lines) > max_lines:
+            syn_lines = syn_lines[:max_lines]
+            if syn_lines:
+                syn_lines[-1] = syn_lines[-1].rstrip(".") + "…"
+        c.setFont("Helvetica", syn_size)
+        for j, sline in enumerate(syn_lines):
+            c.drawCentredString(page_w / 2, syn_top - j * syn_line_h, sline)
+
     if cfg.author:
         c.setFont("Helvetica", 13)
-        c.drawCentredString(page_w / 2, page_h * 0.16, cfg.author)
+        c.drawCentredString(page_w / 2, author_y, cfg.author)
     c.showPage()
 
 
@@ -160,6 +186,10 @@ def compose_pdf(
     blank_verso: bool = False,
     include_belongs_to_page: bool | None = None,
     include_color_test_page: bool | None = None,
+    cover_image: Path | None = None,
+    front_extra_images: list[Path] | None = None,
+    back_extra_images: list[Path] | None = None,
+    synopsis: str = "",
 ) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     page_w, page_h = _page_dimensions_pt(cfg)
@@ -186,17 +216,25 @@ def compose_pdf(
 
     # Front matter pages follow each other; a blank verso only separates illustration pages,
     # so the PDF never starts with, or ends on, an empty page.
+    if cover_image is not None and cover_image.exists():
+        _draw_page_image(c, cover_image, cfg)
     if include_title_page:
-        _draw_title_page(c, cfg)
+        _draw_title_page(c, cfg, synopsis)
     if belongs_to:
         _draw_belongs_to_page(c, cfg)
     if color_test:
         _draw_color_test_page(c, cfg)
 
+    for extra in front_extra_images or []:
+        _draw_page_image(c, extra, cfg)
+
     for i, img in enumerate(page_images):
         _draw_page_image(c, img, cfg)
         if blank_verso and i < len(page_images) - 1:
             c.showPage()
+
+    for extra in back_extra_images or []:
+        _draw_page_image(c, extra, cfg)
 
     c.save()
     return out_path

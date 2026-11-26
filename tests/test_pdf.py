@@ -28,3 +28,37 @@ def test_compose_pdf_without_title_and_blank_verso(tmp_path: Path) -> None:
         pages, tmp_path / "book.pdf", cfg, include_title_page=False, blank_verso=True
     )
     assert len(PdfReader(str(out)).pages) == 3
+
+
+def test_compose_pdf_cover_and_extra_pages_order(tmp_path: Path) -> None:
+    pages = [_page(tmp_path / f"page-{i:03d}.png") for i in (1, 2)]
+    cover = _page(tmp_path / "cover.png")
+    front = _page(tmp_path / "front.png")
+    back = _page(tmp_path / "back.png")
+    cfg = BookConfig(theme="x", include_title_page=False)
+    out = compose_pdf(
+        pages,
+        tmp_path / "book.pdf",
+        cfg,
+        include_title_page=False,
+        cover_image=cover,
+        front_extra_images=[front],
+        back_extra_images=[back],
+    )
+    assert len(PdfReader(str(out)).pages) == 5
+
+
+def test_title_page_prints_author_and_synopsis(tmp_path: Path) -> None:
+    pages = [_page(tmp_path / "page-001.png")]
+    cfg = BookConfig(theme="x", title="Lumi's Journey", author="Jane Doe")
+    out = compose_pdf(
+        pages,
+        tmp_path / "book.pdf",
+        cfg,
+        include_title_page=True,
+        synopsis="A short story about courage and belonging.",
+    )
+    text = PdfReader(str(out)).pages[0].extract_text()
+    assert "Lumi's Journey" in text
+    assert "Jane Doe" in text
+    assert "courage and belonging" in text

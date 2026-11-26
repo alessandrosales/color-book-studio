@@ -309,6 +309,17 @@ def test_selective_zip_export_includes_only_chosen_books() -> None:
     b2 = client.post(
         "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1", "title": "Book Beta"}
     ).json()
+    cover = client.post(
+        f"/api/sessions/{b1['id']}/cover/generate",
+        json={"title": "Alpha", "prompt": "Lumi"},
+    )
+    assert cover.status_code == 200, cover.text
+    extra = client.post(
+        f"/api/sessions/{b1['id']}/extra-pages",
+        json={"placement": "front", "title": "Intro", "text": "Welcome"},
+    )
+    assert extra.status_code == 201, extra.text
+    extra_id = extra.json()["id"]
 
     single = client.get(f"/api/sessions/{b1['id']}/export")
     assert single.status_code == 200
@@ -316,6 +327,8 @@ def test_selective_zip_export_includes_only_chosen_books() -> None:
     with zipfile.ZipFile(io.BytesIO(single.content)) as zf:
         names = zf.namelist()
         assert f"data/{b1['id']}/session.json" in names
+        assert f"data/{b1['id']}/cover/cover.png" in names
+        assert f"data/{b1['id']}/extras/extra-{extra_id}.png" in names
         assert f"data/{b2['id']}/session.json" not in names
 
     multi = client.post("/api/export/selected", json={"session_ids": [b2["id"]]})
@@ -327,3 +340,200 @@ def test_selective_zip_export_includes_only_chosen_books() -> None:
 
     empty = client.post("/api/export/selected", json={"session_ids": []})
     assert empty.status_code == 400
+
+
+def test_style_reference_detects_caption_font(monkeypatch: pytest.MonkeyPatch) -> None:
+    from color_book_generator.typography import TypographyStyle
+
+    monkeypatch.setattr(
+        "color_book_generator.web.routers.studio.detect_typography",
+        lambda image, *, provider, model: TypographyStyle(font_family="serif", bold=True),
+    )
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    sid = session["id"]
+
+    upload = client.post(
+        f"/api/sessions/{sid}/style",
+        files={"image": ("text-style.png", _png_bytes(), "image/png")},
+    )
+    assert upload.status_code == 200, upload.text
+
+    detected = client.post(f"/api/sessions/{sid}/style/detect")
+    assert detected.status_code == 200, detected.text
+    body = detected.json()
+    assert body["font_family"] == "serif"
+    assert body["font_bold"] is True
+    assert body["typography_error"] is None
+
+    refreshed = client.get(f"/api/sessions/{sid}").json()
+    assert refreshed["caption_font_family"] == "serif"
+    assert refreshed["caption_font_bold"] is True
+
+
+def test_page_character_references_migrate_into_book_cast() -> None:
+    cid = "497f39c4"
+    store.characters_dir().mkdir(parents=True, exist_ok=True)
+    (store.characters_dir() / f"{cid}.png").write_bytes(_png_bytes())
+    store.save_characters([store.CharacterRecord(id=cid, name="Lumi")])
+
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    sid = session["id"]
+    state = store.load_session(sid)
+    assert state is not None
+    state.pages[0].character_ids = [cid]
+    store.save_session(state)
+
+    refreshed = client.get(f"/api/sessions/{sid}").json()
+    assert [c["id"] for c in refreshed["characters"]] == [cid]
+    assert refreshed["characters"][0]["name"] == "Lumi"
+
+
+def test_extra_text_pages_crud_and_pdf_compose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from color_book_generator.page_layout import PageLayout
+
+    monkeypatch.setattr(
+        "color_book_generator.web.routers.studio.plan_page_layout",
+        lambda **_kwargs: PageLayout(
+            text_align="center",
+            text_vertical="center",
+            show_border=False,
+            image_position="above",
+            image_size="small",
+            image_prompt="Lumi",
+        ),
+    )
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    sid = session["id"]
+
+    created = client.post(
+        f"/api/sessions/{sid}/extra-pages",
+        json={
+            "placement": "front",
+            "title": "Bem-vindo",
+            "text": "Uma pequena introdução.",
+            "prompt": "Moldura de flores nas bordas",
+        },
+    )
+    assert created.status_code == 201, created.text
+    page = created.json()
+    assert page["status"] == "done"
+    assert page["prompt"] == "Moldura de flores nas bordas"
+    assert page["preview_url"]
+    assert client.get(page["preview_url"]).status_code == 200
+
+    visual = client.post(f"/api/sessions/{sid}/extra-pages/{page['id']}/visual", json={})
+    assert visual.status_code == 200, visual.text
+    assert visual.json()["preview_url"]
+    assert store.extra_page_background_path(sid, page["id"]).exists()
+
+    patched = client.patch(
+        f"/api/sessions/{sid}/extra-pages/{page['id']}",
+        json={"text": "Texto atualizado.", "include_in_pdf": False},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["text"] == "Texto atualizado."
+    assert patched.json()["include_in_pdf"] is False
+
+    back = client.post(
+        f"/api/sessions/{sid}/extra-pages",
+        json={"placement": "back", "title": "Fim", "text": "Até a próxima!"},
+    )
+    assert back.status_code == 201
+    refreshed = client.get(f"/api/sessions/{sid}").json()
+    assert len(refreshed["front_extra_pages"]) == 1
+    assert len(refreshed["back_extra_pages"]) == 1
+
+    store.pages_dir(sid).mkdir(parents=True, exist_ok=True)
+    Image.new("L", (400, 500), 255).save(store.pages_dir(sid) / "page-001.png")
+    composed = client.post(f"/api/sessions/{sid}/compose")
+    assert composed.status_code == 200, composed.text
+    assert composed.json()["pdf_ready"] is True
+
+    deleted = client.delete(f"/api/sessions/{sid}/extra-pages/{page['id']}")
+    assert deleted.status_code == 204
+    final = client.get(f"/api/sessions/{sid}").json()
+    assert final["front_extra_pages"] == []
+
+
+def test_cover_generation_exposes_preview_and_settings() -> None:
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    sid = session["id"]
+
+    cover = client.post(
+        f"/api/sessions/{sid}/cover/generate",
+        json={"title": "Lumi e o Vale", "prompt": "Lumi voando ao amanhecer"},
+    )
+    assert cover.status_code == 200, cover.text
+    body = cover.json()
+    assert body["status"] == "done"
+    assert body["preview_url"]
+    assert client.get(body["preview_url"]).status_code == 200
+    with Image.open(store.cover_path(sid)) as cover_img:
+        assert cover_img.mode == "RGB"
+
+    patched = client.patch(
+        f"/api/sessions/{sid}",
+        json={"cover_include": False, "cover_title": "Novo título", "cover_color": False},
+    )
+    assert patched.status_code == 200
+    assert patched.json()["cover_include"] is False
+    assert patched.json()["cover_title"] == "Novo título"
+    assert patched.json()["cover_color"] is False
+
+    line_cover = client.post(f"/api/sessions/{sid}/cover/generate", json={})
+    assert line_cover.status_code == 200, line_cover.text
+    with Image.open(store.cover_path(sid)) as cover_img:
+        assert cover_img.mode == "L"
+
+    removed = client.delete(f"/api/sessions/{sid}/cover")
+    assert removed.status_code == 204
+    assert client.get(f"/api/sessions/{sid}").json()["cover_preview_url"] is None
+
+
+def test_patch_author_and_synopsis_for_title_page() -> None:
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    sid = session["id"]
+    patched = client.patch(
+        f"/api/sessions/{sid}",
+        json={"author": "Jane Doe", "story_synopsis": "A story about courage."},
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert body["author"] == "Jane Doe"
+    assert body["story_synopsis"] == "A story about courage."
+
+
+def test_plan_page_layout_reads_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    from color_book_generator import page_layout
+
+    monkeypatch.setattr(
+        page_layout,
+        "_call_text_llm",
+        lambda *_a, **_k: (
+            '{"text_align":"center","text_vertical":"center","show_border":false,'
+            '"image_position":"above","image_size":"small","image_prompt":"Lumi"}'
+        ),
+    )
+    layout = page_layout.plan_page_layout(
+        page_prompt="texto centralizado, sem bordas, Lumi pequeno acima",
+        title="",
+        text="Thank you",
+    )
+    assert layout.text_align == "center"
+    assert layout.text_vertical == "center"
+    assert layout.show_border is False
+    assert layout.image_position == "above"
+    assert layout.image_size == "small"
+    assert layout.image_prompt == "Lumi"

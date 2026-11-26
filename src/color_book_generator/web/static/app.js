@@ -79,14 +79,14 @@ function sessionIdFromUrl() {
 
 /* ==================== STEPPER & GSAP TRANSITIONS ==================== */
 function setStep(step, { animate = true, persist = true } = {}) {
-  const next = Math.max(1, Math.min(4, Number(step) || 1));
+  const next = Math.max(1, Math.min(5, Number(step) || 1));
   state.currentStep = next;
 
   $$(".step-tab").forEach((tab) => {
     tab.classList.toggle("is-active", Number(tab.dataset.step) === next);
   });
 
-  for (let i = 1; i <= 4; i++) {
+  for (let i = 1; i <= 5; i++) {
     const panel = $(`#stage-${i}`);
     const isTarget = i === next;
     panel.classList.toggle("is-hidden", !isTarget);
@@ -135,17 +135,17 @@ function renderHeaderAndStepper() {
   $("#step-2-sub").textContent = `${s.characters.length} ${s.characters.length === 1 ? "personagem" : "personagens"}`;
   $("#step-3-sub").textContent = s.story_synopsis ? "Roteiro pronto" : `${totalCount} páginas`;
   $("#step-4-sub").textContent = `${doneCount} / ${totalCount} prontas`;
+  $("#step-5-sub").textContent = s.cover_status === "done" ? "Capa pronta" : "Capa e PDF";
   $("#progress-pill").textContent = `${doneCount} / ${totalCount} prontas`;
 
   const canCompose = doneCount > 0;
   $("#compose-btn").disabled = !canCompose;
-  $("#compose-btn-stage").disabled = !canCompose;
+  const composeFinal = $("#compose-final-btn");
+  if (composeFinal) composeFinal.disabled = !canCompose;
 
-  for (const linkSel of ["#pdf-link", "#pdf-link-stage"]) {
-    const el = $(linkSel);
-    el.classList.toggle("is-hidden", !s.pdf_ready || !s.pdf_url);
-    if (s.pdf_url) el.href = s.pdf_url;
-  }
+  const pdfLink = $("#pdf-link");
+  pdfLink.classList.toggle("is-hidden", !s.pdf_ready || !s.pdf_url);
+  if (s.pdf_url) pdfLink.href = s.pdf_url;
 }
 
 function renderPresets() {
@@ -196,25 +196,43 @@ function renderStage1Form() {
   $("#proc-crop").checked = proc.crop_to_content ?? true;
   syncAllPopoverSelects();
 
-  // Style anchor preview
+  // Text style reference preview
   const preview = $("#style-preview");
   const removeBtn = $("#style-remove");
   preview.innerHTML = "";
   if (s.style_url) {
     const img = document.createElement("img");
     img.src = s.style_url;
-    img.alt = "Âncora de estilo do livro";
+    img.alt = "Amostra de texto de referência";
     img.addEventListener("click", () => {
-      openLightbox([{ url: s.style_url, caption: "Âncora visual de estilo do livro" }], 0);
+      openLightbox([{ url: s.style_url, caption: "Amostra de texto de referência" }], 0);
     });
     preview.appendChild(img);
     removeBtn.classList.toggle("is-hidden", Boolean(s.style_inherited_global));
   } else {
     const span = document.createElement("span");
-    span.textContent = "Nenhuma imagem âncora definida ainda. Gere uma com IA ou envie uma imagem de referência.";
+    span.textContent = "Nenhuma amostra de texto definida ainda. Envie uma imagem com o estilo de fonte desejado.";
     preview.appendChild(span);
     removeBtn.classList.add("is-hidden");
   }
+
+  renderCaptionSettings(s);
+  $("#style-detect-btn").classList.toggle("is-hidden", !s.style_url);
+}
+
+function renderCaptionSettings(s) {
+  $("#caption-enabled").checked = Boolean(s.caption_enabled);
+  $("#caption-style").value = s.caption_style || "balloon";
+  $("#caption-position").value = s.caption_position || "bottom";
+  $("#caption-font").value = s.caption_font_family || "sans";
+  $("#caption-weight").value = s.caption_font_bold ? "bold" : "normal";
+  $("#caption-size").value = String(s.caption_font_size || 0.032);
+  $("#caption-options").style.opacity = s.caption_enabled ? "1" : "0.5";
+
+  const fontLabels = { sans: "Sans", serif: "Serif", mono: "Mono" };
+  $("#style-typography-status").textContent =
+    `Fonte aplicada: ${fontLabels[s.caption_font_family] || "Sans"} · ` +
+    (s.caption_font_bold ? "Negrito" : "Normal");
 }
 
 function costRank(slug) {
@@ -404,17 +422,8 @@ function renderStage3Story() {
     btn.classList.toggle("is-active", btn.dataset.storyMode === s.story_mode);
   });
   $("#story-premise").value = s.story_premise || "";
-  $("#story-synopsis").value = s.story_synopsis || "";
   $("#story-pages").value = s.pages.length || 12;
   if ($("#story-language")) $("#story-language").value = s.language || "en";
-
-  $("#caption-enabled").checked = Boolean(s.caption_enabled);
-  $("#caption-style").value = s.caption_style || "balloon";
-  $("#caption-position").value = s.caption_position || "bottom";
-  $("#caption-font").value = s.caption_font_family || "sans";
-  $("#caption-weight").value = s.caption_font_bold ? "bold" : "normal";
-  $("#caption-size").value = String(s.caption_font_size || 0.032);
-  $("#caption-options").style.opacity = s.caption_enabled ? "1" : "0.5";
 
   const list = $("#script-list");
   list.innerHTML = "";
@@ -523,11 +532,6 @@ function renderStage4Pages() {
   const s = state.session;
   if (!s) return;
 
-  $("#kdp-blank-verso").checked = Boolean(s.blank_verso);
-  $("#kdp-title-page").checked = Boolean(s.include_title_page);
-  $("#kdp-belongs-to").checked = Boolean(s.include_belongs_to_page);
-  $("#kdp-color-test").checked = Boolean(s.include_color_test_page);
-
   const list = $("#page-list");
   list.innerHTML = "";
   const allChars = allSelectableCharacters();
@@ -567,7 +571,7 @@ function renderStage4Pages() {
             </button>
             ${
               page.status === "done"
-                ? `<button class="btn btn-outline btn-sm page-style-btn" type="button">Usar como estilo</button>
+                ? `<button class="btn btn-outline btn-sm page-style-btn" type="button">Usar fonte desta página</button>
                    <a class="btn btn-ghost btn-sm" href="${page.image_url}" download>PNG 300 DPI</a>`
                 : ""
             }
@@ -620,7 +624,8 @@ function renderStage4Pages() {
         try {
           await api(`/api/sessions/${state.sid}/pages/${page.index}/use-as-style`, { method: "POST" });
           await reloadSession();
-          toast(`Página ${page.index} definida como âncora de estilo deste livro!`);
+          toast(`Página ${page.index} definida como referência de texto deste livro!`);
+          await detectReferenceTypography(true);
         } catch (err) {
           toast(err.message, true);
         }
@@ -632,6 +637,245 @@ function renderStage4Pages() {
   }
 }
 
+
+function updateExtraThumb(card, page) {
+  const thumb = card.querySelector(".extra-page-thumb");
+  if (!thumb) return;
+  if (!page.preview_url) {
+    thumb.innerHTML = `<span>${STATUS_LABEL[page.status] || "sem imagem"}</span>`;
+    return;
+  }
+  let img = thumb.querySelector("img");
+  if (!img) {
+    thumb.innerHTML = "";
+    img = document.createElement("img");
+    thumb.appendChild(img);
+  }
+  img.src = page.preview_url;
+  img.alt = "Página de texto gerada";
+  img.onclick = () =>
+    openLightbox([{ url: page.preview_url, caption: page.title || "Página de texto" }], 0);
+}
+
+function renderExtraPageList(pages, listEl, emptyEl) {
+  listEl.innerHTML = "";
+  emptyEl.classList.toggle("is-hidden", pages.length > 0);
+  for (const page of pages) {
+    const card = document.createElement("div");
+    card.className = "extra-page-card";
+    card.innerHTML = `
+      <div class="extra-page-thumb"></div>
+      <div class="extra-page-body">
+        <div class="extra-page-head">
+          <strong>${page.placement === "front" ? "Página inicial" : "Página final"}</strong>
+          <label class="check-toggle">
+            <input type="checkbox" class="extra-include" />
+            <span>Incluir no PDF</span>
+          </label>
+        </div>
+        <label class="field-label">
+          <span>Título</span>
+          <input class="field extra-title" type="text" placeholder="Título da página (opcional)" />
+        </label>
+        <label class="field-label">
+          <span>Texto</span>
+          <textarea class="field extra-text" rows="5" placeholder="Escreva o conteúdo desta página."></textarea>
+        </label>
+        <label class="field-label">
+          <span>Prompt da página</span>
+          <textarea class="field extra-prompt" rows="3" placeholder="Ex: texto centralizado horizontal e verticalmente, sem bordas, com uma imagem pequena do Lumi acima."></textarea>
+        </label>
+        <div class="topbar-actions">
+          <button class="btn btn-accent btn-sm extra-visual-btn" type="button">Gerar página</button>
+          <a class="btn btn-ghost btn-sm extra-download is-hidden" href="#" download>PNG</a>
+          <button class="btn btn-danger-ghost btn-sm extra-remove-btn" type="button">Remover</button>
+        </div>
+        ${page.error ? `<p class="error-msg" style="margin: 0;"></p>` : ""}
+      </div>
+    `;
+    const titleEl = card.querySelector(".extra-title");
+    const textEl = card.querySelector(".extra-text");
+    const promptEl = card.querySelector(".extra-prompt");
+    const includeEl = card.querySelector(".extra-include");
+    const downloadEl = card.querySelector(".extra-download");
+    titleEl.value = page.title || "";
+    textEl.value = page.text || "";
+    promptEl.value = page.prompt || "";
+    includeEl.checked = Boolean(page.include_in_pdf);
+    if (page.download_url) {
+      downloadEl.href = page.download_url;
+      downloadEl.classList.remove("is-hidden");
+    }
+    if (page.error) card.querySelector(".error-msg").textContent = page.error;
+    const visualBtn = card.querySelector(".extra-visual-btn");
+    visualBtn.textContent = page.preview_url ? "Regenerar página" : "Gerar página";
+    updateExtraThumb(card, page);
+
+    const applyUpdate = (updated) => {
+      Object.assign(page, updated);
+      includeEl.checked = Boolean(page.include_in_pdf);
+      if (page.download_url) {
+        downloadEl.href = page.download_url;
+        downloadEl.classList.remove("is-hidden");
+      }
+      card.querySelector(".extra-visual-btn").textContent = page.preview_url
+        ? "Regenerar página"
+        : "Gerar página";
+      updateExtraThumb(card, page);
+    };
+
+    const saveText = debounce(async () => {
+      try {
+        const updated = await api(
+          `/api/sessions/${state.sid}/extra-pages/${page.id}`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({
+              title: titleEl.value,
+              text: textEl.value,
+              prompt: promptEl.value,
+            }),
+          }
+        );
+        applyUpdate(updated);
+        state.session.pdf_ready = false;
+        renderHeaderAndStepper();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    }, 700);
+    titleEl.addEventListener("input", saveText);
+    textEl.addEventListener("input", saveText);
+    promptEl.addEventListener("input", saveText);
+
+
+    card.querySelector(".extra-visual-btn").addEventListener("click", async () => {
+      const btn = card.querySelector(".extra-visual-btn");
+      if (!promptEl.value.trim()) {
+        toast("Informe um prompt visual para esta página.", true);
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = "Gerando página…";
+      try {
+        await api(`/api/sessions/${state.sid}/extra-pages/${page.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            title: titleEl.value,
+            text: textEl.value,
+            prompt: promptEl.value,
+          }),
+        });
+        const updated = await api(
+          `/api/sessions/${state.sid}/extra-pages/${page.id}/visual`,
+          { method: "POST", body: JSON.stringify({}) }
+        );
+        applyUpdate(updated);
+        state.session.pdf_ready = false;
+        renderHeaderAndStepper();
+        toast("Página gerada!");
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = page.preview_url ? "Regenerar página" : "Gerar página";
+      }
+    });
+
+    includeEl.addEventListener("change", async () => {
+      try {
+        const updated = await api(
+          `/api/sessions/${state.sid}/extra-pages/${page.id}`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({ include_in_pdf: includeEl.checked }),
+          }
+        );
+        applyUpdate(updated);
+        state.session.pdf_ready = false;
+        renderHeaderAndStepper();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+
+    card.querySelector(".extra-remove-btn").addEventListener("click", async () => {
+      try {
+        await api(`/api/sessions/${state.sid}/extra-pages/${page.id}`, {
+          method: "DELETE",
+        });
+        await reloadSession();
+        toast("Página removida.");
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+
+    listEl.appendChild(card);
+  }
+}
+
+function renderStage5Finalize() {
+  const s = state.session;
+  if (!s) return;
+
+  $("#cover-include").checked = Boolean(s.cover_include);
+  $("#cover-color").checked = s.cover_color !== false;
+  $("#cover-title").value = s.cover_title || "";
+  $("#cover-prompt").value = s.cover_prompt || "";
+  const preview = $("#cover-preview");
+  preview.innerHTML = "";
+  if (s.cover_preview_url) {
+    const img = document.createElement("img");
+    img.src = s.cover_preview_url;
+    img.alt = "Capa do livro";
+    img.addEventListener("click", () =>
+      openLightbox([{ url: s.cover_preview_url, caption: "Capa do livro" }], 0)
+    );
+    preview.appendChild(img);
+  } else {
+    const span = document.createElement("span");
+    span.textContent =
+      s.cover_status === "generating"
+        ? "Gerando capa…"
+        : "Nenhuma capa gerada ainda.";
+    preview.appendChild(span);
+  }
+  const coverBtn = $("#cover-generate-btn");
+  coverBtn.disabled = s.cover_status === "generating";
+  coverBtn.textContent =
+    s.cover_status === "generating"
+      ? "Gerando capa…"
+      : s.cover_preview_url
+      ? "Regerar capa"
+      : "Gerar capa";
+  const download = $("#cover-download");
+  download.classList.toggle("is-hidden", !s.cover_download_url);
+  if (s.cover_download_url) download.href = s.cover_download_url;
+  $("#cover-remove-btn").classList.toggle("is-hidden", !s.cover_preview_url);
+  const coverError = $("#cover-error");
+  coverError.classList.toggle("is-hidden", !s.cover_error);
+  coverError.textContent = s.cover_error || "";
+
+  $("#book-author").value = s.author || "";
+  $("#story-synopsis").value = s.story_synopsis || "";
+
+  $("#kdp-blank-verso").checked = Boolean(s.blank_verso);
+  $("#kdp-title-page").checked = Boolean(s.include_title_page);
+  $("#kdp-belongs-to").checked = Boolean(s.include_belongs_to_page);
+  $("#kdp-color-test").checked = Boolean(s.include_color_test_page);
+
+  const pdfReady = Boolean(s.pdf_ready && s.pdf_url);
+  $("#pdf-final-status").textContent = pdfReady ? "PDF pronto" : "PDF não gerado";
+  const pdfLink = $("#pdf-final-link");
+  pdfLink.classList.toggle("is-hidden", !pdfReady);
+  if (pdfReady) pdfLink.href = s.pdf_url;
+  $("#compose-final-btn").disabled = !s.pages.some((p) => p.status === "done");
+
+  renderExtraPageList(s.front_extra_pages || [], $("#front-extra-list"), $("#front-extra-empty"));
+  renderExtraPageList(s.back_extra_pages || [], $("#back-extra-list"), $("#back-extra-empty"));
+}
+
 function renderAll() {
   renderHeaderAndStepper();
   renderPresets();
@@ -639,6 +883,7 @@ function renderAll() {
   renderStage2Characters();
   renderStage3Story();
   renderStage4Pages();
+  renderStage5Finalize();
   syncAllPopoverSelects();
 }
 
@@ -672,6 +917,33 @@ async function saveStyleConfig() {
     toast("Padrões do livro salvos.");
   } catch (err) {
     toast(err.message, true);
+  }
+}
+
+async function detectReferenceTypography(silent = false) {
+  const btn = $("#style-detect-btn");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Detectando fonte…";
+  }
+  try {
+    const res = await api(`/api/sessions/${state.sid}/style/detect`, { method: "POST" });
+    await reloadSession();
+    if (res.typography_error) {
+      toast("Não consegui detectar a fonte da imagem. Ajuste manualmente.", true);
+      return;
+    }
+    const fontLabels = { sans: "Sans", serif: "Serif", mono: "Mono" };
+    const label = fontLabels[res.font_family] || "Sans";
+    const weight = res.font_bold ? "Negrito" : "Normal";
+    if (!silent) toast(`Fonte detectada: ${label} · ${weight}`);
+  } catch (err) {
+    if (!silent) toast(err.message || "Falha ao detectar a fonte.", true);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = "Detectar fonte da imagem";
+    }
   }
 }
 
@@ -715,21 +987,42 @@ async function generateAllPending() {
 }
 
 async function composePdfAction() {
-  for (const sel of ["#compose-btn", "#compose-btn-stage"]) {
-    $(sel).disabled = true;
-    $(sel).textContent = "Gerando PDF…";
+  const topBtn = $("#compose-btn");
+  const finalBtn = $("#compose-final-btn");
+  const errorEl = $("#pdf-final-error");
+  if (errorEl) errorEl.classList.add("is-hidden");
+  try {
+    state.session = await api(`/api/sessions/${state.sid}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        author: $("#book-author").value,
+        story_synopsis: $("#story-synopsis").value,
+      }),
+    });
+  } catch (_) {}
+
+  topBtn.disabled = true;
+  topBtn.textContent = "Gerando PDF…";
+  if (finalBtn) {
+    finalBtn.disabled = true;
+    finalBtn.textContent = "Gerando PDF…";
   }
   try {
     state.session = await api(`/api/sessions/${state.sid}/compose`, { method: "POST" });
     renderHeaderAndStepper();
+    renderStage5Finalize();
     toast("PDF KDP pronto para download!");
   } catch (err) {
+    if (errorEl) {
+      errorEl.textContent = err.message;
+      errorEl.classList.remove("is-hidden");
+    }
     toast(err.message, true);
   } finally {
-    for (const sel of ["#compose-btn", "#compose-btn-stage"]) {
-      $(sel).textContent = "Gerar PDF KDP";
-    }
+    topBtn.textContent = "Gerar PDF KDP";
+    if (finalBtn) finalBtn.textContent = "Gerar PDF final";
     renderHeaderAndStepper();
+    renderStage5Finalize();
   }
 }
 
@@ -918,6 +1211,7 @@ function bindEvents() {
 
   $("#provider").addEventListener("change", () => renderModelSuggestions({ forceCheapest: true }));
   $("#save-style-config").addEventListener("click", saveStyleConfig);
+  $("#style-detect-btn").addEventListener("click", () => detectReferenceTypography());
   $("#autopilot-full-btn").addEventListener("click", () => triggerAutopilot("pdf"));
   $("#autopilot-plan-btn").addEventListener("click", () => triggerAutopilot("blueprint"));
   $("#autopilot-cancel").addEventListener("click", async () => {
@@ -967,7 +1261,7 @@ function bindEvents() {
     const errEl = $("#style-error");
     errEl.classList.add("is-hidden");
     btn.disabled = true;
-    btn.textContent = "Gerando âncora de estilo…";
+    btn.textContent = "Gerando amostra visual…";
     try {
       await saveStyleConfig();
       await api(`/api/sessions/${state.sid}/style/generate`, {
@@ -975,26 +1269,27 @@ function bindEvents() {
         body: JSON.stringify({ sample_subject: $("#style-sample-subject").value.trim() }),
       });
       await reloadSession();
-      toast("Âncora visual de estilo gerada!");
+      toast("Amostra visual de traço gerada!");
     } catch (err) {
       errEl.textContent = err.message;
       errEl.classList.remove("is-hidden");
     } finally {
       btn.disabled = false;
-      btn.textContent = "Gerar âncora de estilo com IA";
+      btn.textContent = "Gerar amostra visual";
     }
   });
 
   $("#style-upload").addEventListener("click", async () => {
     const file = $("#style-file").files?.[0];
-    if (!file) return toast("Selecione uma imagem de estilo.", true);
+    if (!file) return toast("Selecione uma imagem com uma amostra de texto.", true);
     const form = new FormData();
     form.append("image", file);
     try {
       await api(`/api/sessions/${state.sid}/style`, { method: "POST", body: form });
       $("#style-file").value = "";
       await reloadSession();
-      toast("Âncora de estilo enviada!");
+      toast("Amostra de texto enviada!");
+      await detectReferenceTypography(true);
     } catch (err) {
       toast(err.message, true);
     }
@@ -1003,7 +1298,7 @@ function bindEvents() {
   $("#style-remove").addEventListener("click", async () => {
     await api(`/api/sessions/${state.sid}/style`, { method: "DELETE" });
     await reloadSession();
-    toast("Âncora de estilo removida.");
+    toast("Referência de texto removida.");
   });
 
   // Stage 2: Character Sheet
@@ -1068,16 +1363,23 @@ function bindEvents() {
   });
 
   $("#story-save-btn").addEventListener("click", async () => {
+    const errEl = $("#story-error");
+    errEl.classList.add("is-hidden");
     try {
-      await api(`/api/sessions/${state.sid}/story`, {
+      state.session = await api(`/api/sessions/${state.sid}`, {
         method: "PATCH",
         body: JSON.stringify({
-          premise: $("#story-premise").value,
-          synopsis: $("#story-synopsis").value,
+          story_mode: state.session.story_mode || "narrative",
+          story_premise: $("#story-premise").value,
+          language: $("#story-language").value,
+          pages: Math.max(1, Math.min(200, Number($("#story-pages").value) || 12)),
         }),
       });
-      toast("Sinopse salva.");
+      renderAll();
+      toast("Roteiro, idioma e páginas salvos.");
     } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("is-hidden");
       toast(err.message, true);
     }
   });
@@ -1127,13 +1429,14 @@ function bindEvents() {
         caption_font_size: Number($("#caption-size").value),
       }),
     });
-    renderStage3Story();
+    renderCaptionSettings(state.session);
+    toast("Estilo do texto atualizado.");
   };
   for (const sel of ["#caption-enabled", "#caption-style", "#caption-position", "#caption-font", "#caption-weight", "#caption-size"]) {
     $(sel).addEventListener("change", saveCaptionSettings);
   }
 
-  // Stage 4: KDP options & PDF
+  // Stage 5: PDF finalization options
   const saveKdpOptions = async () => {
     state.session = await api(`/api/sessions/${state.sid}`, {
       method: "PATCH",
@@ -1145,14 +1448,143 @@ function bindEvents() {
       }),
     });
     renderHeaderAndStepper();
+    renderStage5Finalize();
   };
   for (const sel of ["#kdp-blank-verso", "#kdp-title-page", "#kdp-belongs-to", "#kdp-color-test"]) {
     $(sel).addEventListener("change", saveKdpOptions);
   }
 
+  const saveBookInfo = async () => {
+    const errEl = $("#book-info-error");
+    errEl.classList.add("is-hidden");
+    try {
+      state.session = await api(`/api/sessions/${state.sid}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          author: $("#book-author").value,
+          story_synopsis: $("#story-synopsis").value,
+        }),
+      });
+      renderHeaderAndStepper();
+      toast("Informações da folha de rosto salvas.");
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("is-hidden");
+      toast(err.message, true);
+    }
+  };
+  $("#save-book-info-btn").addEventListener("click", saveBookInfo);
+  const saveBookInfoDebounced = debounce(async () => {
+    state.session = await api(`/api/sessions/${state.sid}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        author: $("#book-author").value,
+        story_synopsis: $("#story-synopsis").value,
+      }),
+    }).catch(() => state.session);
+  }, 800);
+  $("#book-author").addEventListener("input", saveBookInfoDebounced);
+  $("#story-synopsis").addEventListener("input", saveBookInfoDebounced);
+
   $("#generate-pending").addEventListener("click", generateAllPending);
   $("#compose-btn").addEventListener("click", composePdfAction);
-  $("#compose-btn-stage").addEventListener("click", composePdfAction);
+  $("#compose-final-btn").addEventListener("click", composePdfAction);
+
+  $("#cover-include").addEventListener("change", async () => {
+    try {
+      state.session = await api(`/api/sessions/${state.sid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ cover_include: $("#cover-include").checked }),
+      });
+      renderHeaderAndStepper();
+      renderStage5Finalize();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("#cover-color").addEventListener("change", async () => {
+    try {
+      state.session = await api(`/api/sessions/${state.sid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ cover_color: $("#cover-color").checked }),
+      });
+      toast($("#cover-color").checked ? "Capa será gerada colorida." : "Capa será gerada em P&B.");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  const saveCoverMeta = debounce(async () => {
+    try {
+      state.session = await api(`/api/sessions/${state.sid}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          cover_title: $("#cover-title").value,
+          cover_prompt: $("#cover-prompt").value,
+        }),
+      });
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }, 500);
+  $("#cover-title").addEventListener("input", saveCoverMeta);
+  $("#cover-prompt").addEventListener("input", saveCoverMeta);
+
+  $("#cover-generate-btn").addEventListener("click", async () => {
+    const btn = $("#cover-generate-btn");
+    const errEl = $("#cover-error");
+    errEl.classList.add("is-hidden");
+    btn.disabled = true;
+    btn.textContent = "Gerando capa…";
+    try {
+      await api(`/api/sessions/${state.sid}/cover/generate`, {
+        method: "POST",
+        body: JSON.stringify({
+          title: $("#cover-title").value.trim(),
+          prompt: $("#cover-prompt").value.trim(),
+          color: $("#cover-color").checked,
+        }),
+      });
+      await reloadSession();
+      toast("Capa gerada!");
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("is-hidden");
+      toast(err.message, true);
+    } finally {
+      renderStage5Finalize();
+    }
+  });
+
+  $("#cover-remove-btn").addEventListener("click", async () => {
+    try {
+      await api(`/api/sessions/${state.sid}/cover`, { method: "DELETE" });
+      await reloadSession();
+      toast("Capa removida.");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  const addExtraPage = async (placement) => {
+    try {
+      await api(`/api/sessions/${state.sid}/extra-pages`, {
+        method: "POST",
+        body: JSON.stringify({
+          placement,
+          title: placement === "front" ? "Página inicial" : "Página final",
+          text: "",
+        }),
+      });
+      await reloadSession();
+      toast("Página adicionada. Edite o texto abaixo.");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  };
+  $("#add-front-extra-btn").addEventListener("click", () => addExtraPage("front"));
+  $("#add-back-extra-btn").addEventListener("click", () => addExtraPage("back"));
 
   // Lightbox
   $("#lightbox-close").addEventListener("click", closeLightbox);

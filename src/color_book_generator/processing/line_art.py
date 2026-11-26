@@ -116,3 +116,27 @@ def prepare_page(
     canvas.paste(art, (0, band if caption.position == "top" else 0))
     draw_caption(canvas, caption_text, caption, band)
     return canvas
+
+
+def fit_color_to_page(img: Image.Image, target_px: tuple[int, int]) -> Image.Image:
+    """Fit a color image onto the page without converting it to line art."""
+    source = img.convert("RGB")
+    tw, th = target_px
+    scale = min(tw / source.width, th / source.height)
+    new_w = max(1, round(source.width * scale))
+    new_h = max(1, round(source.height * scale))
+    resized = source.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    canvas = Image.new("RGB", target_px, color=(255, 255, 255))
+    canvas.paste(resized, ((tw - new_w) // 2, (th - new_h) // 2))
+    return canvas
+
+
+def crop_content(img: Image.Image, threshold: int = 245) -> Image.Image:
+    """Crop a line-art image to the bounding box of its dark content."""
+    arr = np.array(img.convert("L"))
+    ys, xs = np.where(arr < threshold)
+    if len(xs) == 0:
+        return img
+    return img.crop(
+        (int(np.min(xs)), int(np.min(ys)), int(np.max(xs)) + 1, int(np.max(ys)) + 1)
+    )

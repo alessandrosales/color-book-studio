@@ -100,10 +100,37 @@ class PageState(BaseModel):
         return _drop_nulls(data)
 
 
+class ExtraPage(BaseModel):
+    id: str = Field(pattern=ID_PATTERN)
+    placement: Literal["front", "back"] = "front"
+    title: str = ""
+    text: str = ""
+    prompt: str = ""
+    text_align: Literal["left", "center"] = "center"
+    text_vertical: Literal["top", "center", "bottom"] = "center"
+    show_border: bool = False
+    illustration_position: Literal["background", "above", "below", "none"] = "background"
+    illustration_size: Literal["small", "medium", "large"] = "small"
+    include_in_pdf: bool = True
+    status: PageStatus = "pending"
+    error: str | None = None
+    updated_at: datetime | None = None
+
+    @property
+    def filename(self) -> str:
+        return f"extra-{self.id}.png"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_nulls(cls, data: Any) -> Any:
+        return _drop_nulls(data)
+
+
 class SessionState(BaseModel):
     id: str = Field(pattern=ID_PATTERN)
     created_at: datetime = Field(default_factory=datetime.now)
     title: str
+    author: str = ""
     context_prompt: str
     provider: str
     model: str
@@ -116,7 +143,7 @@ class SessionState(BaseModel):
     caption_font_bold: bool = False
     caption_font_size: float = 0.032
 
-    # Multi-category & 4-stage pipeline metadata
+    # Multi-category & 5-stage pipeline metadata
     language: str = "en"
     preset_id: str | None = None
     category: str = "cozy"
@@ -131,6 +158,15 @@ class SessionState(BaseModel):
     include_title_page: bool = True
     include_belongs_to_page: bool = False
     include_color_test_page: bool = False
+    cover_include: bool = True
+    cover_color: bool = True
+    cover_title: str = ""
+    cover_prompt: str = ""
+    cover_status: PageStatus = "pending"
+    cover_error: str | None = None
+    cover_updated_at: datetime | None = None
+    front_extra_pages: list[ExtraPage] = Field(default_factory=list)
+    back_extra_pages: list[ExtraPage] = Field(default_factory=list)
     current_step: int = 1
 
     @model_validator(mode="before")
@@ -293,12 +329,36 @@ def preview_dir(sid: str) -> Path:
     return session_dir(sid) / "previews"
 
 
+def cover_dir(sid: str) -> Path:
+    return session_dir(sid) / "cover"
+
+
+def cover_path(sid: str) -> Path:
+    return cover_dir(sid) / "cover.png"
+
+
+def extras_dir(sid: str) -> Path:
+    return session_dir(sid) / "extras"
+
+
+def extra_page_path(sid: str, page_id: str) -> Path:
+    return extras_dir(sid) / f"extra-{page_id}.png"
+
+
+def extra_page_background_path(sid: str, page_id: str) -> Path:
+    return extras_dir(sid) / f"extra-{page_id}-background.png"
+
+
 def _session_file(sid: str) -> Path:
     return session_dir(sid) / "session.json"
 
 
 def new_session_id() -> str:
     return secrets.token_hex(6)
+
+
+def new_extra_page_id() -> str:
+    return secrets.token_hex(4)
 
 
 def create_session(
@@ -380,3 +440,46 @@ def save_session(state: SessionState) -> None:
     _session_file(state.id).write_text(
         state.model_dump_json(indent=2), encoding="utf-8"
     )
+
+
+def migrate_referenced_characters(state: SessionState) -> bool:
+    """Import global characters referenced by pages into the book's cast.
+
+    Older books stored only the global character id on pages, so the per-book
+    cast could look empty even though the pages used a character. This keeps the
+    book self-contained and makes the cast show up in the studio.
+    """
+    referenced = {cid for page in state.pages for cid in page.character_ids}
+    missing = referenced - {character.id for character in state.characters}
+    if not missing:
+        return False
+
+    globals_by_id = {record.id: record for record in load_characters()}
+    session_dir(state.id).mkdir(parents=True, exist_ok=True)
+    session_characters_dir(state.id).mkdir(parents=True, exist_ok=True)
+    changed = False
+    for cid in missing:
+        record = globals_by_id.get(cid)
+        if record is None:
+            continue
+        source = characters_dir() / record.filename
+        if not source.exists():
+            continue
+        (session_characters_dir(state.id) / record.filename).write_bytes(
+            source.read_bytes()
+        )
+        state.characters.append(
+            BookCharacter(
+                id=record.id,
+                name=record.name,
+                description=record.description,
+                approved=True,
+                sheet_status="ready",
+                updated_at=datetime.now(),
+            )
+        )
+        changed = True
+
+    if changed:
+        save_session(state)
+    return changed

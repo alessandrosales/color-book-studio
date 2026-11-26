@@ -42,21 +42,37 @@ afetar o atual.
   redesenho no estilo line-art. Suporte a referências: provedor `codex`
   (imagens `input_image`) e `openai` com `gpt-image-1` (images.edit); os demais
   provedores retornam erro se houver referência marcada.
-- **Legenda / balão**: ative nos padrões, escolha estilo (`balão de fala` ou
-  `legenda`), posição (`topo`/`base`), **fonte** (Sans/Serif/Mono), **peso**
-  (normal/negrito) e **tamanho**. Cada página tem seu próprio campo de texto; o
-  texto é desenhado no PNG final (faixa reservada), não gerado pelo modelo.
-- **Estilo (referência)**: defina uma imagem ou use uma página já gerada com o
-  botão *Usar como estilo*. Ela é enviada em toda geração como fonte visual para
-  repetir traço, nível de detalhe e composição (sem copiar o assunto).
+- **Referência de texto (fonte)**: no passo 1, envie uma imagem com uma amostra do
+  texto (ou use uma página já gerada com *Usar fonte desta página*). A fonte
+  detectada — família (Sans/Serif/Mono) e peso (normal/negrito) — é aplicada nas
+  legendas e balões das páginas geradas. O mesmo card concentra todas as definições
+  de texto: ativar legenda/balão, estilo (`balão de fala` ou `legenda`), posição
+  (`topo`/`base`), fonte, peso e tamanho. Cada página tem seu próprio campo de
+  texto; o texto é desenhado no PNG final (faixa reservada), não gerado pelo modelo.
 - Cada imagem gerada entra na lista com preview, status e download do PNG em 300 dpi.
   Clicar na miniatura abre um **lightbox** (navegação com ←/→, fecha com Esc/clique
   fora) sem baixar o arquivo.
-- **Gerar pendentes** roda a fila; **Gerar PDF** compõe o interior no tamanho trim.
+- **Gerar pendentes** (passo 4) roda a fila das páginas ilustradas.
+- **Capa e finalização (passo 5)**: a capa é fixa e tem direção de arte própria;
+  o contexto do livro, o roteiro completo e as referências servem de memória
+  conceitual. Pode ser gerada colorida (padrão) ou em line art, e o título é
+  aplicado sobre uma faixa na base. Também permite adicionar páginas de texto
+  iniciais (depois da capa) e finais (depois dos desenhos), cada uma com preview,
+  edição, checkbox para entrar no PDF e um **prompt da página** que define como o
+  texto e a(s) imagem(ns) são organizados (alinhamento, posição/tamanho da imagem,
+  borda etc.) antes de gerar o preview. Os toggles de KDP (verso em branco, folha
+  de rosto, “este livro pertence a”, teste de cores) e a composição final do PDF
+  ficam nesse passo. **Autor e sinopse** também ficam aqui; quando a folha de rosto
+  está ativada, ambos são impressos nela.
+- **Gerar PDF** compõe capa + páginas iniciais + páginas ilustradas + páginas
+  finais no tamanho trim.
 - **Backup**: o painel *Backup* exporta um `.zip` com sessões (incluindo
-  `raw/`, páginas, `previews/`, `book.pdf`), personagens, estilo, `settings.json`
-  e `config/book.yaml`. A importação valida tudo antes de escrever (sem estado
-  parcial), aceita zips antigos/sem manifest e mostra uma tela de progresso.
+  `raw/`, páginas, `previews/`, `cover/`, `extras/`, `style/`, `characters/`,
+  `book.pdf`), personagens globais, estilo global, `settings.json`, presets
+  personalizados e `config/book.yaml`. A importação valida sessões, capas,
+  páginas extras (imagem final e fundo visual), personagens, estilos e
+  configurações antes de escrever (sem estado parcial), aceita zips antigos/sem
+  manifest e mostra uma tela de progresso.
   Se o mesmo livro (id) já existir, a importação cria uma **nova cópia** com outro
   id em vez de sobrescrever; personagens são mesclados por id; o
   `book.yaml` restaurado mantém geometria/margens/DPI. Credenciais não entram.
@@ -136,9 +152,9 @@ output/web/{settings.json,characters/,style/}
 3. `processing/line_art.py` converte para P&B puro: cinza → limpeza → threshold
    (adaptive/otsu/fixed) → remoção de componentes pequenos → corte no conteúdo →
    centralização com margem de segurança na resolução final (`dpi`).
-4. `layout/pdf.py` compõe um PDF com o tamanho de página do preset, página de
-   título opcional e verso em branco opcional (`blank_verso`, útil para
-   impressão frente única com canetinhas).
+4. `layout/pdf.py` compõe um PDF com o tamanho de página do preset, capa,
+   páginas de texto iniciais/finais, página de título opcional e verso em branco
+   opcional (`blank_verso`, útil para impressão frente única com canetinhas).
 
 Cada página final é um PNG em `300 dpi` (configurável) no tamanho trim do livro —
 pronto para upload em KDP/IngramSpark como interior.

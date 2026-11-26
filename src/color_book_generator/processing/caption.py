@@ -219,3 +219,175 @@ def caption_band_height(target_px: tuple[int, int], cfg: CaptionConfig, text: st
     if not cfg.enabled or not text.strip():
         return 0
     return round(target_px[1] * cfg.band_ratio)
+
+
+def render_text_page(
+    target_px: tuple[int, int],
+    title: str,
+    text: str,
+    cfg: CaptionConfig,
+    *,
+    margin_ratio: float = 0.1,
+    background: Image.Image | None = None,
+    align: str = "center",
+    vertical: str = "center",
+    show_border: bool = False,
+    illustration_position: str = "background",
+    illustration_size: str = "small",
+) -> Image.Image:
+    """Render a text page, optionally with a generated illustration/background."""
+    from color_book_generator.processing.line_art import crop_content
+
+    width, height = target_px
+    if background is not None and illustration_position == "background":
+        canvas = background.convert("L")
+        if canvas.size != target_px:
+            canvas = canvas.resize(target_px, Image.Resampling.LANCZOS)
+    else:
+        canvas = Image.new("L", target_px, color=255)
+    draw = ImageDraw.Draw(canvas)
+
+    margin_x = round(width * margin_ratio)
+    margin_y = round(height * margin_ratio)
+    area_w = max(1, width - 2 * margin_x)
+    pad_x = round(width * 0.03)
+    pad_y = round(height * 0.025)
+    text_max_w = max(1, area_w - 2 * pad_x)
+
+    clean_title = title.strip()
+    body = text.strip()
+    title_size = max(10, round(width * cfg.font_size_ratio * 2.0))
+    title_font = _font(title_size, cfg.font_family)
+    title_lines = _wrap(draw, clean_title, title_font, text_max_w) if clean_title else []
+    title_line_h = round(title_size * 1.2)
+
+    body_size = max(10, round(width * cfg.font_size_ratio))
+    body_font = _font(body_size, cfg.font_family)
+    body_lines = _wrap(draw, body, body_font, text_max_w) if body else []
+    body_line_h = round(body_size * 1.35)
+    gap = round(title_size * 0.5) if title_lines and body_lines else 0
+
+    def max_line_w() -> float:
+        widths = [draw.textlength(line, font=title_font) for line in title_lines]
+        widths += [draw.textlength(line, font=body_font) for line in body_lines]
+        return max(widths) if widths else 0.0
+
+    def block_height() -> int:
+        return (
+            pad_y * 2
+            + len(title_lines) * title_line_h
+            + gap
+            + len(body_lines) * body_line_h
+        )
+
+    art: Image.Image | None = None
+    art_h = 0
+    art_gap = round(height * 0.025)
+    if background is not None and illustration_position in {"above", "below"}:
+        art = crop_content(background)
+        size_frac = {"small": 0.24, "medium": 0.32, "large": 0.42}.get(
+            illustration_size, 0.24
+        )
+        width_frac = {"small": 0.5, "medium": 0.65, "large": 0.82}.get(
+            illustration_size, 0.5
+        )
+        region_h = round(height * size_frac)
+        region_w = round(area_w * width_frac)
+        scale = min(region_w / art.width, region_h / art.height)
+        art = art.resize(
+            (max(1, round(art.width * scale)), max(1, round(art.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+        art_h = art.height + art_gap
+
+    available_text_h = height - 2 * margin_y - art_h
+    while block_height() > available_text_h * 0.95 and body_size > 10:
+        body_size -= 1
+        body_font = _font(body_size, cfg.font_family)
+        body_lines = _wrap(draw, body, body_font, text_max_w) if body else []
+        body_line_h = round(body_size * 1.35)
+
+    block_h = block_height()
+    block_w = min(area_w, round(max_line_w()) + 2 * pad_x)
+    block_x = margin_x + (area_w - block_w) // 2
+
+    if art is not None and illustration_position in {"above", "below"}:
+        group_h = art.height + art_gap + block_h
+        if vertical == "top":
+            group_top = margin_y
+        elif vertical == "bottom":
+            group_top = height - margin_y - group_h
+        else:
+            group_top = (height - group_h) // 2
+        if illustration_position == "above":
+            art_y = group_top
+            block_y = group_top + art.height + art_gap
+        else:
+            block_y = group_top
+            art_y = group_top + block_h + art_gap
+        canvas.paste(art, ((width - art.width) // 2, art_y))
+    else:
+        if vertical == "top":
+            block_y = margin_y
+        elif vertical == "bottom":
+            block_y = height - margin_y - block_h
+        else:
+            block_y = margin_y + (height - 2 * margin_y - block_h) // 2
+
+    has_visual = background is not None and illustration_position != "none"
+    if has_visual or show_border:
+        draw.rounded_rectangle(
+            (block_x, block_y, block_x + block_w, block_y + block_h),
+            radius=round(width * 0.018),
+            fill=255,
+            outline=0 if show_border else None,
+            width=max(2, round(width * 0.002)) if show_border else 1,
+        )
+
+    centered = align != "left"
+    y = block_y + pad_y
+    for line in title_lines:
+        line_w = draw.textlength(line, font=title_font)
+        x = block_x + ((block_w - line_w) / 2 if centered else pad_x)
+        _text(draw, (x, y), line, title_font, title_size, True)
+        y += title_line_h
+    y += gap
+    for line in body_lines:
+        line_w = draw.textlength(line, font=body_font)
+        x = block_x + ((block_w - line_w) / 2 if centered else pad_x)
+        _text(draw, (x, y), line, body_font, body_size, cfg.bold)
+        y += body_line_h
+    return canvas
+
+
+def draw_cover_title(
+    canvas: Image.Image, title: str, cfg: CaptionConfig
+) -> Image.Image:
+    """Draw the book title on a white band at the bottom of the cover."""
+    clean = title.strip()
+    if not clean:
+        return canvas
+    width, height = canvas.size
+    band_h = round(height * 0.15)
+    band_y0 = height - band_h
+    draw = ImageDraw.Draw(canvas)
+    fill = 255 if canvas.mode == "L" else (255, 255, 255)
+    draw.rectangle((0, band_y0, width, height), fill=fill)
+    draw.line((0, band_y0, width, band_y0), fill=0, width=max(2, round(width * 0.003)))
+
+    size = max(18, round(width * cfg.font_size_ratio * 1.9))
+    max_w = round(width * 0.86)
+    font = _font(size, cfg.font_family)
+    lines = _wrap(draw, clean, font, max_w)
+    line_h = round(size * 1.16)
+    while lines and line_h * len(lines) > band_h * 0.78 and size > 12:
+        size -= 2
+        font = _font(size, cfg.font_family)
+        lines = _wrap(draw, clean, font, max_w)
+        line_h = round(size * 1.16)
+    y = band_y0 + (band_h - line_h * len(lines)) / 2
+    for line in lines:
+        line_w = draw.textlength(line, font=font)
+        _text(draw, ((width - line_w) / 2, y), line, font, size, True)
+        y += line_h
+    return canvas

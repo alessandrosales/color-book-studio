@@ -23,6 +23,8 @@
   --stage-3-num: #6e8fd8;
   --stage-4-bg: #eaf7f1;
   --stage-4-num: #489d75;
+  --stage-5-bg: #fdf3d8;
+  --stage-5-num: #bf882b;
 
   /* Status tokens */
   --ok-bg: #e5f6ed;
@@ -361,6 +363,16 @@ textarea.field {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
+}
+
+.field-grow {
+  flex: 1;
+  min-height: 0;
+}
+
+.field-grow textarea {
+  flex: 1;
+  min-height: 160px;
 }
 
 .check-toggle {
@@ -855,6 +867,7 @@ textarea.field {
 .workflow-mini[data-stage='2'] { background: var(--stage-2-bg); }
 .workflow-mini[data-stage='3'] { background: var(--stage-3-bg); }
 .workflow-mini[data-stage='4'] { background: var(--stage-4-bg); }
+.workflow-mini[data-stage='5'] { background: var(--stage-5-bg); }
 
 .workflow-mini-num {
   font-size: 1.35rem;
@@ -865,6 +878,7 @@ textarea.field {
 .workflow-mini[data-stage='2'] .workflow-mini-num { color: var(--stage-2-num); }
 .workflow-mini[data-stage='3'] .workflow-mini-num { color: var(--stage-3-num); }
 .workflow-mini[data-stage='4'] .workflow-mini-num { color: var(--stage-4-num); }
+.workflow-mini[data-stage='5'] .workflow-mini-num { color: var(--stage-5-num); }
 
 .workflow-mini h3 {
   margin: 4px 0 0;
@@ -935,7 +949,7 @@ textarea.field {
 
 .stepper {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 12px;
 }
 
@@ -961,6 +975,7 @@ textarea.field {
 .step-tab[data-step='2'].is-active { background: var(--stage-2-bg); border-color: var(--stage-2-num); }
 .step-tab[data-step='3'].is-active { background: var(--stage-3-bg); border-color: var(--stage-3-num); }
 .step-tab[data-step='4'].is-active { background: var(--stage-4-bg); border-color: var(--stage-4-num); }
+.step-tab[data-step='5'].is-active { background: var(--stage-5-bg); border-color: var(--stage-5-num); }
 
 .step-num {
   width: 30px;
@@ -981,6 +996,7 @@ textarea.field {
 .step-tab[data-step='2'].is-active .step-num { background: var(--stage-2-num); color: #fff; }
 .step-tab[data-step='3'].is-active .step-num { background: var(--stage-3-num); color: #fff; }
 .step-tab[data-step='4'].is-active .step-num { background: var(--stage-4-num); color: #fff; }
+.step-tab[data-step='5'].is-active .step-num { background: var(--stage-5-num); color: #fff; }
 
 .step-text {
   display: flex;
@@ -1043,6 +1059,7 @@ textarea.field {
 .stage-panel[data-stage='2'] { background: var(--stage-2-bg); }
 .stage-panel[data-stage='3'] { background: var(--stage-3-bg); }
 .stage-panel[data-stage='4'] { background: var(--stage-4-bg); }
+.stage-panel[data-stage='5'] { background: var(--stage-5-bg); }
 
 .stage-head {
   display: flex;
@@ -1074,6 +1091,7 @@ textarea.field {
 .stage-panel[data-stage='2'] .stage-big-num { color: var(--stage-2-num); }
 .stage-panel[data-stage='3'] .stage-big-num { color: var(--stage-3-num); }
 .stage-panel[data-stage='4'] .stage-big-num { color: var(--stage-4-num); }
+.stage-panel[data-stage='5'] .stage-big-num { color: var(--stage-5-num); }
 
 .stage-head h1 {
   margin: 0;
@@ -1617,4 +1635,83 @@ textarea.field {
 
 @media (max-width: 560px) {
   .stepper { grid-template-columns: 1fr; }
+}
+
+/* Extra text pages (cover/finalization step) */
+.extra-page-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.extra-page-card {
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.extra-page-thumb {
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #ffffff;
+  overflow: hidden;
+  aspect-ratio: 8.5 / 11;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.extra-page-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  cursor: zoom-in;
+}
+
+.extra-page-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.extra-page-card .topbar-actions {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+  .extra-page-card { grid-template-columns: 1fr; }
+  .extra-page-thumb { max-width: 220px; }
+}
+
+
+/* Cover card: fields left, artwork right */
+.cover-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.72fr);
+  gap: 22px;
+  align-items: start;
+}
+
+.cover-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cover-art .anchor-preview {
+  aspect-ratio: 8.5 / 11;
+  max-height: none;
+}
+
+@media (max-width: 900px) {
+  .cover-split { grid-template-columns: 1fr; }
+  .cover-art { max-width: 360px; }
 }
