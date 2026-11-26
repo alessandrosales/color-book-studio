@@ -214,8 +214,8 @@ def compose_pdf(
         else include_color_test_page
     )
 
-    # Front matter pages follow each other; a blank verso only separates illustration pages,
-    # so the PDF never starts with, or ends on, an empty page.
+    # Front matter precedes the illustrations. Every illustration gets its own
+    # blank reverse when single-sided printing is requested.
     if cover_image is not None and cover_image.exists():
         _draw_page_image(c, cover_image, cfg)
     if include_title_page:
@@ -228,9 +228,14 @@ def compose_pdf(
     for extra in front_extra_images or []:
         _draw_page_image(c, extra, cfg)
 
-    for i, img in enumerate(page_images):
+    # In a left-to-right book, odd pages are right-hand pages. Start the
+    # illustrations on a right-hand page so each following blank is its verso.
+    if blank_verso and page_images and c.getPageNumber() % 2 == 0:
+        c.showPage()
+
+    for img in page_images:
         _draw_page_image(c, img, cfg)
-        if blank_verso and i < len(page_images) - 1:
+        if blank_verso:
             c.showPage()
 
     for extra in back_extra_images or []:

@@ -27,7 +27,19 @@ def test_compose_pdf_without_title_and_blank_verso(tmp_path: Path) -> None:
     out = compose_pdf(
         pages, tmp_path / "book.pdf", cfg, include_title_page=False, blank_verso=True
     )
-    assert len(PdfReader(str(out)).pages) == 3
+    assert len(PdfReader(str(out)).pages) == 4
+
+
+def test_last_illustration_has_blank_verso_before_back_matter(tmp_path: Path) -> None:
+    page = _page(tmp_path / "page.png")
+    back = _page(tmp_path / "back.png")
+    out = compose_pdf(
+        [page], tmp_path / "book.pdf", BookConfig(theme="x"),
+        include_title_page=False, blank_verso=True, back_extra_images=[back],
+    )
+    reader = PdfReader(str(out))
+    assert len(reader.pages) == 3
+    assert not reader.pages[1].get_contents()
 
 
 def test_compose_pdf_cover_and_extra_pages_order(tmp_path: Path) -> None:

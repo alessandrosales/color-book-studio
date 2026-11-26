@@ -55,6 +55,11 @@ class ImportResult(BaseModel):
     skipped: int = 0
 
 
+def _is_internal_file(rel: Path) -> bool:
+    """Runtime-only files: locks, atomic-write temporaries and local backups."""
+    return any(part.startswith(".") for part in rel.parts) or rel.name.endswith(".bak")
+
+
 def export_archive(destination: Path) -> Path:
     root = store.WEB_ROOT
     files = 0
@@ -65,6 +70,8 @@ def export_archive(destination: Path) -> Path:
                     continue
                 rel = path.relative_to(root)
                 if rel.parts and rel.parts[0] == "exports":
+                    continue
+                if _is_internal_file(rel):
                     continue
                 zf.write(path, f"data/{rel.as_posix()}")
                 files += 1
@@ -119,6 +126,8 @@ def export_selected_archive(destination: Path, session_ids: list[str]) -> Path:
                 if not path.is_file():
                     continue
                 rel = path.relative_to(root)
+                if _is_internal_file(rel):
+                    continue
                 zf.write(path, f"data/{rel.as_posix()}")
                 files += 1
 

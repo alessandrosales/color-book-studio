@@ -233,7 +233,7 @@ def get_access_token(auth_path: Path | None = None) -> str:
     tokens = load_tokens(auth_path)
     if tokens is None:
         raise CodexAuthError(
-            "ChatGPT Plus nao esta autenticado. Rode `cbg auth codex` ou conecte na interface web."
+            "ChatGPT Plus nao esta autenticado. Conecte na interface web."
         )
     if token_is_expiring(tokens["access_token"]):
         tokens = refresh_tokens(tokens)

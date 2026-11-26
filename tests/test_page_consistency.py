@@ -80,13 +80,14 @@ def test_pdf_pages_have_the_chosen_format_and_no_blank_page(tmp_path: Path) -> N
     assert all(len(p.images) == 1 for p in list(reader.pages)[1:])
 
 
-def test_blank_verso_only_between_illustrations(tmp_path: Path) -> None:
+def test_blank_verso_after_each_illustration(tmp_path: Path) -> None:
     pages = [_page(tmp_path / f"page-{i:03d}.png") for i in (1, 2, 3)]
     cfg = BookConfig(theme="x", page_size="6x9", bleed_in=0.0)
     out = compose_pdf(
         pages, tmp_path / "book.pdf", cfg, include_title_page=True, blank_verso=True
     )
     reader = PdfReader(str(out))
-    # title + page, blank, page, blank, page
-    assert len(reader.pages) == 6
-    assert len(reader.pages[-1].images) == 1
+    # title, alignment page, then three illustrations and their blank versos
+    assert len(reader.pages) == 8
+    assert len(reader.pages[-2].images) == 1
+    assert len(reader.pages[-1].images) == 0

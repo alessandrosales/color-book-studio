@@ -140,3 +140,18 @@ def crop_content(img: Image.Image, threshold: int = 245) -> Image.Image:
     return img.crop(
         (int(np.min(xs)), int(np.min(ys)), int(np.max(xs)) + 1, int(np.max(ys)) + 1)
     )
+
+
+def ink_ratio(img: Image.Image) -> float:
+    """Fraction of dark pixels in a line-art image."""
+    arr = np.asarray(img.convert("L"))
+    return float((arr < 128).mean())
+
+
+def score_line_art(page: Image.Image) -> float:
+    """Prefer readable line art: enough ink, not a black blob."""
+    ratio = ink_ratio(page)
+    ideal = 0.12
+    if ratio < 0.01 or ratio > 0.6:
+        return -1.0
+    return 1.0 - abs(ratio - ideal)

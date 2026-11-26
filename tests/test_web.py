@@ -1,8 +1,10 @@
+import io
 import json
 
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
+from pypdf import PdfReader
 
 from color_book_generator.providers.base import ImageProvider, register
 from color_book_generator.web import store
@@ -115,6 +117,67 @@ def test_compose_without_pages_fails() -> None:
     ).json()
     res = client.post(f"/api/sessions/{session['id']}/compose")
     assert res.status_code == 400
+
+
+def test_kdp_preflight_counts_planned_pages_without_creating_files() -> None:
+    session = client.post(
+        "/api/sessions", json={"pages": 12, "provider": "fake", "blank_verso": True}
+    ).json()
+    sid = session["id"]
+    res = client.get(f"/api/sessions/{sid}/kdp-preflight")
+    assert res.status_code == 200
+    report = res.json()
+    assert report["physical_pages"] == 26
+    assert report["kdp_pages"] == 26
+    assert any("pendentes" in error for error in report["errors"])
+    assert any("capa completa" in error for error in report["errors"])
+    assert not (store.session_dir(sid) / "book.pdf").exists()
+
+
+def test_kdp_interior_export_omits_cover_and_requires_complete_pages() -> None:
+    session = client.post(
+        "/api/sessions", json={"pages": 12, "provider": "fake", "blank_verso": True}
+    ).json()
+    sid = session["id"]
+    assert client.post(f"/api/sessions/{sid}/kdp-interior").status_code == 400
+
+    state = store.load_session(sid)
+    assert state is not None
+    for page in state.pages:
+        page.status = "done"
+        Image.new("L", (100, 130), 255).save(store.page_file(sid, page.index))
+    store.cover_dir(sid).mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (100, 130), "red").save(store.cover_path(sid))
+    store.save_session(state)
+
+    response = client.post(f"/api/sessions/{sid}/kdp-interior")
+    assert response.status_code == 200
+    pdf = PdfReader(io.BytesIO(response.content))
+    assert len(pdf.pages) == 26
+    assert float(pdf.pages[0].mediabox.width) == 8.5 * 72
+    assert float(pdf.pages[0].mediabox.height) == 11 * 72
+    assert len(pdf.pages[2].images) == 1
+
+
+def test_kdp_interior_export_rejects_unimplemented_bleed(monkeypatch) -> None:
+    from color_book_generator.config import BookConfig
+
+    session = client.post(
+        "/api/sessions", json={"pages": 12, "provider": "fake", "blank_verso": True}
+    ).json()
+    state = store.load_session(session["id"])
+    assert state is not None
+    for page in state.pages:
+        page.status = "done"
+        Image.new("L", (100, 130), 255).save(store.page_file(state.id, page.index))
+    store.save_session(state)
+    monkeypatch.setattr(
+        "color_book_generator.web.app._config",
+        lambda: BookConfig(theme="test", bleed_in=0.125),
+    )
+    response = client.post(f"/api/sessions/{state.id}/kdp-interior")
+    assert response.status_code == 400
+    assert any("sangria" in error for error in response.json()["detail"])
 
 
 def test_unknown_session_and_page() -> None:
