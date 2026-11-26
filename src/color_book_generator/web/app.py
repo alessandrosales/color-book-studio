@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
@@ -38,14 +38,17 @@ from color_book_generator.config import (
     default_book_config_path,
     load_book_config,
 )
+from color_book_generator.layout import pdfx
+from color_book_generator.layout.cover import CoverGeometry, compose_cover_pdf, cover_geometry
 from color_book_generator.layout.pdf import (
+    PageOp,
     compose_pdf,
     describe_adjustment,
     interior_adjustments,
     plan_interior,
 )
 from color_book_generator.presets import default_page_layout_for_category, get_preset
-from color_book_generator.print_profile import PRINT_PROFILES, get_profile
+from color_book_generator.print_profile import PRINT_PROFILES, PrintProfile, get_profile
 from color_book_generator.processing.line_art import prepare_page, score_line_art
 from color_book_generator.prompts import (
     compose_page_prompt,
@@ -320,6 +323,7 @@ class SessionPatch(BaseModel):
     include_color_test_page: bool | None = None
     include_publisher_logo: bool | None = None
     print_profile: str | None = None
+    paper: Literal["white", "cream"] | None = None
     cover_include: bool | None = None
     cover_color: bool | None = None
     cover_title: str | None = None
@@ -422,6 +426,7 @@ class SessionView(BaseModel):
     include_publisher_logo: bool = True
     publisher_logo_url: str | None = None
     print_profile: str = "kdp_paperback"
+    paper: str = "white"
     current_step: int = 1
 
 
@@ -536,6 +541,7 @@ def _session_view(state: SessionState) -> SessionView:
         include_publisher_logo=state.include_publisher_logo,
         publisher_logo_url=_publisher_logo_url(),
         print_profile=state.print_profile,
+        paper=state.paper,
         current_step=state.current_step,
     )
 
@@ -1261,6 +1267,8 @@ def patch_session(sid: str, body: SessionPatch) -> SessionView:
             raise HTTPException(status_code=400, detail="perfil de impressao desconhecido")
         state.print_profile = body.print_profile
         state.pdf_ready = False
+    if body.paper is not None:
+        state.paper = body.paper
     if body.cover_include is not None:
         state.cover_include = body.cover_include
         state.pdf_ready = False
@@ -1473,6 +1481,33 @@ def compose(sid: str) -> SessionView:
     return _session_view(state)
 
 
+def _interior_ops(state: SessionState, profile: PrintProfile | None) -> list[PageOp]:
+    """Interior pages (no cover) with every scripted page, generated or not."""
+    planned = [store.page_file(state.id, page.index) for page in sorted(state.pages, key=lambda p: p.index)]
+    return plan_interior(
+        planned,
+        include_title_page=state.include_title_page,
+        blank_verso=state.blank_verso,
+        include_belongs_to_page=state.include_belongs_to_page,
+        include_color_test_page=state.include_color_test_page,
+        front_extra_images=_extra_page_images(state, "front"),
+        back_extra_images=_extra_page_images(state, "back"),
+        publisher_logo=store.publisher_logo_for(state),
+        profile=profile,
+        rtl=_is_rtl(state),
+    )
+
+
+def _cover_geometry(state: SessionState, interior_pages: int) -> CoverGeometry:
+    profile = get_profile(state.print_profile)
+    cfg = _session_cfg(state)
+    return cover_geometry(cfg.trim_size_in, profile.spine_in(interior_pages, state.paper), profile.bleed_in)
+
+
+def _spine_text_allowed(state: SessionState, profile: PrintProfile, pages: int, geo: CoverGeometry) -> bool:
+    return profile.has_spine and pages >= profile.spine_text_min_pages and geo.spine_text_room() > 0.12
+
+
 def _is_rtl(state: SessionState) -> bool:
     """Right-to-left reading (manga answered so in the briefing)."""
     return reads_right_to_left(state.story_brief)
@@ -1511,20 +1546,8 @@ def kdp_preflight(sid: str) -> dict[str, object]:
 
     profile = get_profile(state.print_profile)
     rtl = _is_rtl(state)
-    plan_args = {
-        "include_title_page": state.include_title_page,
-        "blank_verso": state.blank_verso,
-        "include_belongs_to_page": state.include_belongs_to_page,
-        "include_color_test_page": state.include_color_test_page,
-        "front_extra_images": _extra_page_images(state, "front"),
-        "back_extra_images": _extra_page_images(state, "back"),
-        "publisher_logo": store.publisher_logo_for(state),
-        "rtl": rtl,
-    }
-    # Plan with every scripted page, generated or not, so the count is known up front.
-    planned = [store.page_file(sid, page.index) for page in sorted(state.pages, key=lambda p: p.index)]
-    physical_pages = len(plan_interior(planned, **plan_args))  # type: ignore[arg-type]
-    ops = plan_interior(planned, profile=profile, **plan_args)  # type: ignore[arg-type]
+    physical_pages = len(_interior_ops(state, None))
+    ops = _interior_ops(state, profile)
     rounded_pages = len(ops)
     if rounded_pages < profile.min_pages:
         errors.append(
@@ -1566,12 +1589,25 @@ def kdp_preflight(sid: str) -> dict[str, object]:
             errors.append(f"Não foi possível ler a imagem {path.name}.")
     warnings.extend(build_report(state, cfg, _session_caption(state)).warnings)
     interior_errors = errors.copy()
-    errors.append("A capa completa em PDF separado ainda não está disponível.")
+    geo = _cover_geometry(state, rounded_pages)
+    if not store.cover_path(sid).exists():
+        errors.append("Gere a capa no passo de finalização para montar a capa completa (contracapa e lombada).")
+    if profile.has_spine:
+        if _spine_text_allowed(state, profile, rounded_pages, geo):
+            warnings.append(f"Lombada de {geo.spine_w * 25.4:.1f} mm com título e autor.")
+        else:
+            warnings.append(
+                f"Lombada de {geo.spine_w * 25.4:.1f} mm sem texto "
+                f"(texto na lombada a partir de {profile.spine_text_min_pages} páginas)."
+            )
     if state.cover_include:
-        warnings.append("A prévia atual pode incluir a capa no miolo; a contagem acima considera a capa separada.")
+        warnings.append("A prévia do PDF inclui a capa no miolo; para envio use o miolo e a capa completa separados.")
     warnings.append("A resolução dos arquivos processados não comprova a qualidade da imagem original.")
     warnings.append("Revise direitos, metadados, conteúdo gerado por IA e fontes antes de publicar.")
-    warnings.append("A exportação do miolo ainda usa fontes PDF padrão; confira a incorporação e os caracteres antes do envio.")
+    if pdfx.available():
+        warnings.append("Para gráfica, marque PDF/X: as fontes são incorporadas e as cores convertidas.")
+    else:
+        warnings.append("Ghostscript não encontrado: a exportação PDF/X (fontes incorporadas, CMYK) fica indisponível.")
     warnings.append("Confira os arquivos no KDP Print Previewer e revise uma prova física.")
     return {"physical_pages": physical_pages, "kdp_pages": rounded_pages,
             "profile": profile.id, "profile_name": profile.name,
@@ -1581,7 +1617,7 @@ def kdp_preflight(sid: str) -> dict[str, object]:
 
 
 @app.post("/api/sessions/{sid}/kdp-interior")
-def export_kdp_interior(sid: str) -> FileResponse:
+def export_kdp_interior(sid: str, pdfx_export: bool = Query(default=False, alias="pdfx")) -> FileResponse:
     """Create a separate, no-bleed interior for review and download."""
     if not SID_RE.fullmatch(sid):
         raise HTTPException(status_code=400, detail="invalid session id")
@@ -1611,8 +1647,102 @@ def export_kdp_interior(sid: str) -> FileResponse:
         except BaseException:
             path.unlink(missing_ok=True)
             raise
-    slug = re.sub(r"[^a-z0-9]+", "-", state.title.lower()).strip("-") or "color-book"
-    return FileResponse(path, media_type="application/pdf", filename=f"{slug}-interior.pdf",
+    if pdfx_export:
+        path = _convert_pdfx(path, mode="gray", title=state.title)
+    suffix = "-interior-pdfx.pdf" if pdfx_export else "-interior.pdf"
+    return FileResponse(path, media_type="application/pdf", filename=f"{_slug(state.title)}{suffix}",
+                        background=BackgroundTask(path.unlink, missing_ok=True))
+
+
+def _slug(title: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "color-book"
+
+
+def _convert_pdfx(path: Path, *, mode: pdfx.ColorMode, title: str) -> Path:
+    """Convert a temporary PDF to PDF/X in place of the original; 400 when unavailable."""
+    out = path.with_name(path.stem + "-x.pdf")
+    try:
+        pdfx.convert_to_pdfx(path, out, mode=mode, title=title)
+    except pdfx.PdfxError as exc:
+        out.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        path.unlink(missing_ok=True)
+    return out
+
+
+class CoverGeometryView(BaseModel):
+    profile: str
+    profile_name: str
+    pages: int
+    paper: str
+    has_spine: bool
+    spine_mm: float
+    spine_text: bool
+    bleed_mm: float
+    total_w_mm: float
+    total_h_mm: float
+    cover_ready: bool
+    pdfx_available: bool
+    pdfx_custom_icc: bool
+
+
+@app.get("/api/sessions/{sid}/cover-geometry", response_model=CoverGeometryView)
+def cover_geometry_view(sid: str) -> CoverGeometryView:
+    state = _session(sid)
+    profile = get_profile(state.print_profile)
+    pages = len(_interior_ops(state, profile))
+    geo = _cover_geometry(state, pages)
+    return CoverGeometryView(
+        profile=profile.id,
+        profile_name=profile.name,
+        pages=pages,
+        paper=state.paper,
+        has_spine=profile.has_spine,
+        spine_mm=round(geo.spine_w * 25.4, 1),
+        spine_text=_spine_text_allowed(state, profile, pages, geo),
+        bleed_mm=round(geo.bleed * 25.4, 1),
+        total_w_mm=round(geo.total_w * 25.4, 1),
+        total_h_mm=round(geo.total_h * 25.4, 1),
+        cover_ready=store.cover_path(sid).exists(),
+        pdfx_available=pdfx.available(),
+        pdfx_custom_icc=bool(os.getenv("CBG_PDFX_ICC", "").strip()),
+    )
+
+
+@app.post("/api/sessions/{sid}/cover-pdf")
+def export_cover_pdf(sid: str, pdfx_export: bool = Query(default=False, alias="pdfx")) -> FileResponse:
+    """Wrap cover (back, spine, front with bleed) as its own PDF."""
+    if not SID_RE.fullmatch(sid):
+        raise HTTPException(status_code=400, detail="invalid session id")
+    state = _session(sid)
+    cover = store.cover_path(sid)
+    if not cover.exists():
+        raise HTTPException(status_code=400, detail="gere a capa antes de exportar a capa completa")
+    profile = get_profile(state.print_profile)
+    pages = len(_interior_ops(state, profile))
+    geo = _cover_geometry(state, pages)
+    with tempfile.NamedTemporaryFile(prefix="cbg-cover-", suffix=".pdf", delete=False) as handle:
+        path = Path(handle.name)
+    try:
+        compose_cover_pdf(
+            path,
+            cover,
+            geo,
+            title=state.cover_title.strip() or state.title,
+            author=state.author,
+            synopsis=state.story_synopsis,
+            publisher_logo=store.publisher_logo_for(state),
+            spine_text=_spine_text_allowed(state, profile, pages, geo),
+            barcode_area=profile.id == "kdp_paperback",
+        )
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    if pdfx_export:
+        path = _convert_pdfx(path, mode="cmyk", title=state.title)
+    suffix = "-capa-pdfx.pdf" if pdfx_export else "-capa.pdf"
+    return FileResponse(path, media_type="application/pdf", filename=f"{_slug(state.title)}{suffix}",
                         background=BackgroundTask(path.unlink, missing_ok=True))
 
 

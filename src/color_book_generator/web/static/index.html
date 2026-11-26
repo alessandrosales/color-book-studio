@@ -706,9 +706,24 @@
           <div class="floating-card">
             <h2>Verificação de impressão</h2>
             <p class="hint hint-sm">Confere páginas, margem da lombada e desenhos que precisaram ser ajustados para o perfil escolhido. Capa completa, fontes e direitos devem ser revisados separadamente.</p>
+            <div class="print-export-row">
+              <label class="field-label" id="paper-field">
+                <span>Papel do miolo</span>
+                <select id="paper" class="field">
+                  <option value="white">Branco</option>
+                  <option value="cream">Creme</option>
+                </select>
+              </label>
+              <label class="check-toggle" id="pdfx-toggle">
+                <input type="checkbox" id="pdfx-export" />
+                <span>PDF/X para gráfica (CMYK, fontes incorporadas)</span>
+              </label>
+            </div>
+            <p class="hint hint-sm" id="cover-geometry"></p>
             <div class="card-actions">
               <button class="btn btn-outline btn-sm" id="kdp-preflight-btn" type="button">Verificar livro</button>
-              <button class="btn btn-outline btn-sm" id="kdp-interior-btn" type="button">Baixar miolo sem sangria</button>
+              <button class="btn btn-outline btn-sm" id="kdp-interior-btn" type="button">Baixar miolo</button>
+              <button class="btn btn-outline btn-sm" id="cover-pdf-btn" type="button">Baixar capa completa</button>
             </div>
             <div class="preflight-result" id="kdp-preflight-result" aria-live="polite"></div>
           </div>

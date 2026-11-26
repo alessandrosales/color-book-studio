@@ -389,6 +389,10 @@ def compose_pdf(
     if cfg.author:
         c.setAuthor(cfg.author)
     c.setSubject("Coloring book interior")
+    # Printers and PDF/X need the trim declared; with bleed it sits inside the media box.
+    bleed_pt = cfg.bleed_in * inch if cfg.bleed_in > 0 else 0.0
+    c.setTrimBox((bleed_pt, bleed_pt, page_w - bleed_pt, page_h - bleed_pt))
+    c.setBleedBox((0, 0, page_w, page_h))
 
     ops = plan_interior(
         page_images,

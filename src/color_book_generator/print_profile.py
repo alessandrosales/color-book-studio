@@ -34,7 +34,10 @@ class PrintProfile:
     min_pages: int
     max_pages: int
     spine_per_page_in: float = 0.0
+    # Paper-specific caliper per page; falls back to spine_per_page_in.
+    spine_per_page_cream_in: float = 0.0
     spine_text_min_pages: int = 0
+    has_spine: bool = True
     supported_sizes: frozenset[str] = field(default_factory=frozenset)
     notes: tuple[str, ...] = ()
 
@@ -52,8 +55,12 @@ class PrintProfile:
         multiple = max(1, self.page_multiple)
         return pages + (-pages) % multiple
 
-    def spine_in(self, pages: int) -> float:
-        return round(pages * self.spine_per_page_in, 4)
+    def spine_in(self, pages: int, paper: str = "white") -> float:
+        """Spine width for ``pages`` interior pages; 0 for bindings without a spine."""
+        if not self.has_spine:
+            return 0.0
+        per_page = self.spine_per_page_cream_in if paper == "cream" else 0.0
+        return round(pages * (per_page or self.spine_per_page_in), 4)
 
 
 KDP_SIZES = frozenset(
@@ -82,6 +89,7 @@ PRINT_PROFILES: dict[str, PrintProfile] = {
         min_pages=24,
         max_pages=828,
         spine_per_page_in=0.002252,
+        spine_per_page_cream_in=0.0025,
         spine_text_min_pages=79,
         supported_sizes=KDP_SIZES,
         notes=("Confirme gutter e lombada na calculadora oficial da KDP antes do envio.",),
@@ -98,7 +106,13 @@ PRINT_PROFILES: dict[str, PrintProfile] = {
         page_multiple=4,
         min_pages=16,
         max_pages=600,
-        notes=("Em offset a gráfica pode exigir cadernos de 8 ou 16 páginas; confirme.",),
+        # Offset 90 g/m2 is about 0.11 mm per leaf; the shop gives the exact caliper.
+        spine_per_page_in=mm(0.055),
+        spine_text_min_pages=80,
+        notes=(
+            "Em offset a gráfica pode exigir cadernos de 8 ou 16 páginas; confirme.",
+            "A lombada é estimada para offset 90 g/m²; peça à gráfica a medida exata do papel.",
+        ),
     ),
     "grafica_canoa": PrintProfile(
         id="grafica_canoa",
@@ -112,6 +126,7 @@ PRINT_PROFILES: dict[str, PrintProfile] = {
         page_multiple=4,
         min_pages=8,
         max_pages=64,
+        has_spine=False,
         notes=("Acima de ~48 páginas as folhas do meio avançam (creep); peça a compensação à gráfica.",),
     ),
     "home_print": PrintProfile(
@@ -126,6 +141,7 @@ PRINT_PROFILES: dict[str, PrintProfile] = {
         page_multiple=1,
         min_pages=1,
         max_pages=1000,
+        has_spine=False,
     ),
 }
 

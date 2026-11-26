@@ -995,7 +995,34 @@ function renderPrintProfile() {
       ? " O formato atual não é padrão deste perfil."
       : "";
   $("#print-profile-hint").textContent = profile ? `${profile.description}${sizeNote}` : "";
+  $("#paper").value = s.paper || "white";
+  refreshCoverGeometry();
 }
+
+const refreshCoverGeometry = debounce(async () => {
+  if (!state.sid) return;
+  try {
+    const g = await api(`/api/sessions/${state.sid}/cover-geometry`);
+    $("#paper-field").classList.toggle("is-hidden", !g.has_spine);
+    const spine = g.has_spine
+      ? `lombada ${g.spine_mm} mm ${g.spine_text ? "com título" : "sem texto"}`
+      : "sem lombada (grampo ou espiral)";
+    const cover = g.cover_ready ? "" : " Gere a capa para baixar a capa completa.";
+    $("#cover-geometry").textContent =
+      `Capa aberta: ${g.total_w_mm} x ${g.total_h_mm} mm para ${g.pages} páginas, ${spine}, sangria ${g.bleed_mm} mm.${cover}`;
+    $("#cover-pdf-btn").disabled = !g.cover_ready;
+    const pdfxInput = $("#pdfx-export");
+    pdfxInput.disabled = !g.pdfx_available;
+    $("#pdfx-toggle").title = g.pdfx_available
+      ? g.pdfx_custom_icc
+        ? "Usa o perfil ICC definido em CBG_PDFX_ICC."
+        : "Usa o perfil CMYK genérico do Ghostscript; peça à gráfica o perfil dela e defina CBG_PDFX_ICC."
+      : "Instale o Ghostscript para exportar PDF/X.";
+    if (!g.pdfx_available) pdfxInput.checked = false;
+  } catch (_) {
+    // Geometry is informative only.
+  }
+}, 300);
 
 /* ==================== READING STANDARDS ==================== */
 function countWords(text) {
@@ -1410,12 +1437,14 @@ async function refreshAuth() {
 
 /* ==================== BINDINGS & INIT ==================== */
 function bindEvents() {
-  $("#kdp-interior-btn").addEventListener("click", async () => {
-    const button = $("#kdp-interior-btn");
+  const downloadPrintFile = async (button, endpoint, filename, doneMessage) => {
     const result = $("#kdp-preflight-result");
+    const pdfx = $("#pdfx-export").checked;
+    const original = button.textContent;
     button.disabled = true;
+    button.textContent = pdfx ? "Convertendo para PDF/X…" : "Gerando…";
     try {
-      const response = await fetch(`/api/sessions/${state.sid}/kdp-interior`, { method: "POST" });
+      const response = await fetch(`/api/sessions/${state.sid}/${endpoint}?pdfx=${pdfx}`, { method: "POST" });
       if (!response.ok) {
         const data = await response.json();
         throw new Error(Array.isArray(data.detail) ? data.detail.join(" ") : data.detail);
@@ -1423,14 +1452,32 @@ function bindEvents() {
       const url = URL.createObjectURL(await response.blob());
       const link = document.createElement("a");
       link.href = url;
-      link.download = "miolo-kdp.pdf";
+      link.download = pdfx ? filename.replace(".pdf", "-pdfx.pdf") : filename;
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      result.textContent = "Miolo gerado para revisão.";
+      result.textContent = doneMessage;
     } catch (err) {
       result.textContent = err.message;
     } finally {
       button.disabled = false;
+      button.textContent = original;
+    }
+  };
+  $("#kdp-interior-btn").addEventListener("click", () =>
+    downloadPrintFile($("#kdp-interior-btn"), "kdp-interior", "miolo.pdf", "Miolo gerado para revisão."),
+  );
+  $("#cover-pdf-btn").addEventListener("click", () =>
+    downloadPrintFile($("#cover-pdf-btn"), "cover-pdf", "capa-completa.pdf", "Capa completa gerada (contracapa, lombada e frente)."),
+  );
+  $("#paper").addEventListener("change", async () => {
+    try {
+      await api(`/api/sessions/${state.sid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ paper: $("#paper").value }),
+      });
+      await reloadSession();
+    } catch (err) {
+      toast(err.message, true);
     }
   });
   $("#kdp-preflight-btn").addEventListener("click", async () => {

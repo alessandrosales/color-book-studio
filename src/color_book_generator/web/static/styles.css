@@ -2285,3 +2285,15 @@ textarea.field {
 @media (max-width: 760px) {
   .print-profile-row { grid-template-columns: 1fr; }
 }
+
+/* ==================== Print export (finalize step) ==================== */
+.print-export-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 16px;
+}
+
+.print-export-row .field-label {
+  min-width: 160px;
+}

@@ -187,6 +187,7 @@ class SessionState(BaseModel):
     back_extra_pages: list[ExtraPage] = Field(default_factory=list)
     include_publisher_logo: bool = True
     print_profile: str = "kdp_paperback"
+    paper: Literal["white", "cream"] = "white"
     current_step: int = 1
 
     # JSON snapshot of what this object last read from / wrote to disk. Used by
