@@ -7,6 +7,7 @@ from PIL import Image, ImageDraw
 from pypdf import PdfReader
 
 from color_book_generator.providers.base import ImageProvider, register
+from color_book_generator.web import app as app_module
 from color_book_generator.web import store
 from color_book_generator.web.app import app
 
@@ -307,13 +308,35 @@ def test_patch_pages_refuses_to_drop_generated() -> None:
     assert "imagem" in res.json()["detail"]
 
 
-def test_page_caption_is_saved_and_used() -> None:
+def test_page_caption_is_saved_and_used(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+    original_generate = app_module._provider_generate
+
+    def spy_generate(
+        provider_name: str,
+        model: str,
+        prompt: str,
+        target_px: tuple[int, int],
+        negative: str,
+        seed: int | None,
+        references=None,
+        style_reference=None,
+    ) -> Image.Image:
+        captured["prompt"] = prompt
+        captured["negative"] = negative
+        return original_generate(
+            provider_name, model, prompt, target_px, negative, seed, references, style_reference
+        )
+
+    monkeypatch.setattr(app_module, "_provider_generate", spy_generate)
+
     session = client.post(
         "/api/sessions",
         json={
             "pages": 1,
             "provider": "fake",
             "model": "fake-1",
+            "preset_id": "manga_shoujo",
             "caption_enabled": True,
             "caption_style": "balloon",
             "caption_position": "bottom",
@@ -338,6 +361,10 @@ def test_page_caption_is_saved_and_used() -> None:
     assert page["status"] == "done", page
     assert page["caption_text"] == "Where is my family?"
     assert client.get(page["preview_url"]).status_code == 200
+    assert "Where is my family?" in captured["prompt"]
+    assert "Manga speech balloons" in captured["prompt"]
+    assert "no text" not in captured["prompt"].lower()
+    assert "speech bubble," not in captured["negative"].lower()
 
 
 def _png_bytes() -> bytes:

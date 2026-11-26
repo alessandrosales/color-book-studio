@@ -49,9 +49,10 @@ class CodexProvider(ImageProvider):
         image_urls: list[str] = []
         if style_reference is not None:
             prompt = (
-                f"{prompt}\n\nThe first reference image is a STYLE reference: match its "
-                "line weight, level of detail, spacing and composition style. Do not copy "
-                "its subject, characters, text or specific scene."
+                f"{prompt}\n\nThe first reference image is a STRICT STYLE & LAYOUT reference: "
+                "closely match its exact drawing style, line weight, clean uncluttered background "
+                "simplicity, generous white breathing space, panel rhythm, and speech-balloon shape. "
+                "Do not copy its subject, characters, text or specific scene."
             )
             image_urls.append(
                 "data:image/png;base64,"

@@ -158,18 +158,20 @@ _CATEGORY_DEFAULTS: dict[str, dict[str, Any]] = {
             crop_to_content=True,
             target_inner_margin_ratio=0.06,
         ),
-        "caption": _cap(True, "balloon", "sans", False, 0.032),
+        "caption": _cap(True, "caption", "sans", False, 0.032),
     },
     "manga": {
         "page_size": "6x9",
         "negative": (
             "color, screentone, halftone dots, gray shading, solid black areas, blurry, "
+            "cluttered background, excessive tiny details, heavy crosshatching, overcrowded panels, "
             "speech bubble, japanese text, watermark, messy sketch"
         ),
         "sheet": (
-            "Japanese manga character design sheet (settei) on pure white background: "
+            "Clean, uncluttered Japanese manga character design sheet (settei) on pure white background: "
             "full-body front view, three-quarter action pose, and two facial expressions. "
-            "Crisp black ink line art, distinct hairstyle and outfit details, NO screentones, NO shading, pure B&W."
+            "Smooth crisp black ink line art, simple iconic hairstyle and clean outfit with few folds "
+            "(no excessive straps, buckles, pouches, or tiny clutter), NO screentones, NO shading, pure B&W."
         ),
         "processing": ProcessingConfig(
             threshold="adaptive",
@@ -618,15 +620,15 @@ _BUILTIN_PRESETS: list[StylePreset] = [
         badge="Revista",
         tagline="Rostos expressivos e nanquim marcante de aventura de revista semanal.",
         context=(
-            "Classic weekly adventure manga style, bold confident black ink outlines, expressive "
-            "exaggerated faces with wide grins and big round eyes, wavy hair and cloth folds, light "
-            "hatching only as thin closed contour shapes, lively character acting, adventurous "
-            "backdrops such as ships, harbor towns, islands and sea. Outlines only, no screentones, "
-            "no solid black fills."
+            "Clean Japanese weekly adventure manga style: smooth confident black ink outlines, "
+            "expressive faces with clear eyes and dynamic hair shapes, clean uncluttered compositions "
+            "with simple minimal backgrounds (open sky, sea horizon, simple deck or cliff silhouettes) "
+            "and generous white breathing space, crisp speed lines for action beats. "
+            "NO heavy cross-hatching, NO cluttered dense props, NO screentones, outlines only."
         ),
         concept=(
-            "A crew of friends sailing and exploring: harbor town, island, treasure map, storm at "
-            "sea, big feast."
+            "A crew of young human adventurers sailing and exploring: harbor town, island, "
+            "treasure map, storm at sea, big feast."
         ),
         mode="narrative",
         cast=3,

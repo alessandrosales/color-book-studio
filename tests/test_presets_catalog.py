@@ -91,3 +91,5 @@ def test_blueprint_prompt_uses_concept_and_cast(monkeypatch: pytest.MonkeyPatch)
     assert manga is not None
     story_mod.generate_full_book_blueprint(pages=1, preset=manga)
     assert "Book mode: narrative" in seen["prompt"]
+    assert "HUMAN manga/manhwa characters" in seen["prompt"]
+    assert "NEVER anthropomorphic animals" in seen["prompt"]

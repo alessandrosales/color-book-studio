@@ -62,9 +62,10 @@ class OpenAIProvider(ImageProvider):
             files: list[tuple[str, bytes, str]] = []
             if style_reference is not None:
                 full_prompt = (
-                    f"{full_prompt}\n\nThe first reference image is a STYLE reference: "
-                    "match its line weight, detail level and composition. Do not copy its "
-                    "subject, characters or text."
+                    f"{full_prompt}\n\nThe first reference image is a STRICT STYLE & LAYOUT reference: "
+                    "closely match its exact drawing style, line weight, clean uncluttered background "
+                    "simplicity, generous white breathing space, panel rhythm, and speech-balloon shape. "
+                    "Do not copy its subject, characters or text."
                 )
                 files.append(("style.png", style_reference, "image/png"))
             if references:

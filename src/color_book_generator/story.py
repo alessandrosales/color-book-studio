@@ -11,7 +11,48 @@ from pydantic import BaseModel, Field
 
 from color_book_generator.auth import codex as codex_auth
 from color_book_generator.presets import StoryMode as StoryMode
-from color_book_generator.presets import StylePreset
+from color_book_generator.presets import StylePreset, default_page_layout_for_category
+
+
+def _layout_script_guidance(preset: StylePreset | None) -> str:
+    """Return pattern-specific guidance for scene_prompt and caption_text."""
+    layout = default_page_layout_for_category(preset.category) if preset is not None else "single_full"
+    if layout == "manga_action":
+        return (
+            "Page pattern is Japanese MANGA (4-6 clean uncluttered panels with narrow vertical-oval speech balloons): "
+            "write scene_prompt as 3-5 focused, uncluttered cinematic panel beats (mixing an intense close-up of eyes "
+            "or hand/prop, a spacious central action panel with speed lines and simple open background, and a single-"
+            "character reaction shot — NEVER cram all characters and busy cluttered backgrounds into every panel). "
+            "Write caption_text as punchy, short manga dialogue to be lettered INSIDE the narrow vertical-oval speech "
+            "balloons (1-2 ultra-short lines separated by ' | ', e.g. 'LET'S GO! | WAIT!', max 8 words total)."
+        )
+    if layout == "manhwa_editorial":
+        return (
+            "Page pattern is Korean MANHWA (3 vertical-rhythm panels with round speech balloons in the gutters): "
+            "write scene_prompt describing the cinematic panel beats, and write caption_text as expressive "
+            "dialogue that will be lettered INSIDE the gutter speech balloons "
+            "(1 short line, or 2 short lines separated by ' | ', max 12 words total)."
+        )
+    if layout == "single_caption":
+        return (
+            "Page pattern is CHILDREN'S STORYBOOK (upper illustration + dedicated bottom caption band): "
+            "write caption_text as one warm, easy-to-read narrative sentence (max 12 words) that will be "
+            "lettered directly in the bottom band of the page."
+        )
+    if layout == "kawaii_stickers":
+        return (
+            "Page pattern is KAWAII (rounded vignette frames / chibi cluster): "
+            "keep caption_text very short (a cute 2-5 word label, or empty if the concept asks for no captions)."
+        )
+    if layout == "adult_medallion":
+        return (
+            "Page pattern is ADULT INTRICATE (symmetrical medallion / ornate frame): "
+            "keep caption_text to a short calming word or brief poetic quote (max 8 words) for the clean margin."
+        )
+    return (
+        "Page pattern is BOLD & EASY / COZY (single centered rounded-square scene): "
+        "keep caption_text short and cozy (max 8 words) for the clean white margin."
+    )
 
 
 class StoryGenerationError(RuntimeError):
@@ -252,6 +293,7 @@ def generate_story_plan(
         f"Language for title, synopsis and caption_text: {language}\n"
         f"Book mode: {mode} — {mode_instruction}\n"
         f"Visual style category: {style_desc}\n"
+        f"Layout & text placement rule: {_layout_script_guidance(preset)}\n"
         f"Premise / Theme: {clean_premise}\n"
         f"Exact number of pages required: {pages}\n"
         f"Registered characters:\n{cast_lines}\n\n"
@@ -350,10 +392,27 @@ def generate_full_book_blueprint(
         )
     else:
         plural = "s" if cast_size != 1 else ""
+        category = preset.category if preset is not None else "cozy"
+        if category in {"manga", "manhwa"}:
+            kind_rule = (
+                "They MUST be HUMAN manga/manhwa characters (NEVER anthropomorphic animals or furry "
+                "creatures unless the user's theme hint explicitly asks for animals), with clean, "
+                "simple, iconic human hairstyles and uncluttered outfits (avoid excessive buckles, "
+                "straps, belts, tiny pockets, or busy accessories) so every panel stays clean and easy to color."
+            )
+        elif category == "adult":
+            kind_rule = (
+                "Create refined human or mythical figures appropriate for adult editorial/fantasy "
+                "illustration (avoid childish cartoon animals unless requested)."
+            )
+        else:
+            kind_rule = (
+                "Give each character vivid, consistent visual traits (appearance or species, "
+                "hairstyle, signature outfit, accessories) fitting this style."
+            )
         char_guidance = (
-            f"Create exactly {cast_size} memorable recurring main character{plural} with vivid, "
-            "consistent visual traits (species or age, hairstyle, signature outfit, accessories) "
-            "so they stay recognizable on every page."
+            f"Create exactly {cast_size} memorable recurring main character{plural} "
+            f"so they stay recognizable on every page. {kind_rule}"
         )
 
     instructions = (
@@ -366,13 +425,13 @@ def generate_full_book_blueprint(
         '  "synopsis": "2-3 sentence engaging book overview",\n'
         '  "style_anchor_subject": "one iconic showcase coloring scene that demonstrates the exact line weight and aesthetic of the book",\n'
         '  "characters": [\n'
-        '    {"name": "Short Name", "description": "precise visual traits: species/appearance, hair/ears, signature outfit, key accessory (black-and-white drawable details, no color names required)"}\n'
+        '    {"name": "Short Name", "description": "precise visual traits: age/appearance, hairstyle, facial features, signature outfit, key accessory (black-and-white drawable details, no color names required)"}\n'
         "  ],\n"
         '  "pages": [\n'
         "    {\n"
         '      "index": 1,\n'
         '      "title": "short scene label",\n'
-        '      "scene_prompt": "detailed visual coloring-book scene description (subject, pose, action, cozy props/setting, centered balanced framing, NO colors, NO shading, NO text inside the drawing)",\n'
+        '      "scene_prompt": "detailed visual coloring-book scene description (subject, pose, action, props/setting, balanced framing, NO colors, NO shading, NO text inside the drawing)",\n'
         '      "caption_text": "short charming caption or speech bubble text (max 12 words)",\n'
         '      "character_names": ["Exact Name from characters list if present"]\n'
         "    }\n"
@@ -384,6 +443,7 @@ def generate_full_book_blueprint(
         f"Language for title, premise, synopsis, page titles and caption_text: {language}\n"
         f"Selected style & category: {style_name} — {style_desc}\n"
         f"Book mode: {chosen_mode}\n"
+        f"Layout & text placement rule: {_layout_script_guidance(preset)}\n"
         f"{concept_line}"
         f"{hint_line}\n"
         f"Character rule: {char_guidance}\n"
@@ -540,6 +600,7 @@ def generate_bridge_page(
         f"Premise: {premise.strip() or '(not set)'}\n"
         f"Synopsis: {synopsis.strip() or '(not set)'}\n"
         f"Visual style: {style_desc}\n"
+        f"Layout & text placement rule: {_layout_script_guidance(preset)}\n"
         f"Position of the new page: page {new_index} of {total_after}\n"
         f"Registered characters:\n{cast_lines}\n\n"
         f"{_describe_neighbor('Previous page', prev_page)}\n\n"

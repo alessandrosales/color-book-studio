@@ -19,6 +19,7 @@ from color_book_generator.auth.codex import normalize_codex_model
 from color_book_generator.config import (
     BookConfig,
     CaptionConfig,
+    ProcessingConfig,
     default_book_config_path,
     load_book_config,
 )
@@ -34,7 +35,7 @@ from color_book_generator.processing.line_art import (
     prepare_page,
     to_line_art,
 )
-from color_book_generator.prompts import compose_page_prompt
+from color_book_generator.prompts import compose_page_prompt, effective_negative_prompt
 from color_book_generator.providers import get_provider
 from color_book_generator.providers.base import generate_matching
 from color_book_generator.story import (
@@ -1373,6 +1374,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             state.preset_id = preset.id
             state.category = preset.category
             state.page_size = preset.page_size
+            state.page_layout = default_page_layout_for_category(preset.category)
             state.context_prompt = preset.context_prompt
             state.negative_prompt = preset.negative_prompt
             state.processing = preset.processing.model_copy(deep=True)
@@ -1579,7 +1581,6 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             return
 
         # Phase 4: Generate Every Page with Style Anchor + Character Sheets
-        caption_cfg = _session_caption_cfg(state)
         char_by_id = {c.id: c for c in state.characters}
         for page in state.pages:
             if sid in _autopilot_cancel:
@@ -1601,12 +1602,29 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             store.save_session(state)
 
             effective_layout = state.page_layout or default_page_layout_for_category(state.category)
+            embedded_text = page.caption_text.strip() if state.caption_enabled else ""
             full_prompt = compose_page_prompt(
                 state.context_prompt,
                 page.prompt,
                 page.index,
                 len(state.pages),
                 page_layout=effective_layout,
+                caption_text=embedded_text,
+                caption_position=state.caption_position,
+                caption_font_family=state.caption_font_family,
+                caption_font_bold=state.caption_font_bold,
+            )
+            page_negative = effective_negative_prompt(
+                cfg.negative_prompt,
+                has_embedded_text=bool(embedded_text),
+                page_layout=effective_layout,
+            )
+            page_processing = (
+                cfg.processing.model_copy(
+                    update={"min_component_px": min(cfg.processing.min_component_px, 12)}
+                )
+                if embedded_text
+                else cfg.processing
             )
             char_notes = [
                 f"{char_by_id[cid].name}: {char_by_id[cid].description}"
@@ -1628,25 +1646,26 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             def _gen_page(
                 prompt_text: str = full_prompt,
                 page_refs: list[tuple[str, bytes]] = refs,
-                page_caption: str = page.caption_text,
+                page_neg: str = page_negative,
+                proc_cfg: ProcessingConfig = page_processing,
                 page_idx: int = page.index,
             ) -> tuple[Image.Image, Image.Image]:
                 provider = get_provider(provider_name, model_name)
                 effective_style = (
                     style_bytes
-                    or store.load_page_layout_reference_bytes(state.category, page_idx)
+                    or store.load_page_layout_reference_bytes(
+                        state.category, page_idx, preset_id=state.preset_id
+                    )
                 )
                 raw_img = generate_matching(
                     provider,
                     prompt_text,
                     target_size=cfg.image_px,
-                    negative_prompt=cfg.negative_prompt,
+                    negative_prompt=page_neg,
                     references=page_refs or None,
                     style_reference=effective_style,
                 )
-                proc = prepare_page(
-                    raw_img, cfg.image_px, cfg.processing, caption_cfg, page_caption
-                )
+                proc = prepare_page(raw_img, cfg.image_px, proc_cfg)
                 return raw_img, proc
 
             raw_img, processed = await asyncio.to_thread(_gen_page)

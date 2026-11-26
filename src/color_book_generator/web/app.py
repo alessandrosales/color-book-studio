@@ -44,6 +44,7 @@ from color_book_generator.prompts import (
     compose_page_prompt,
     default_context_prompt,
     default_subjects,
+    effective_negative_prompt,
 )
 from color_book_generator.providers import available_providers, get_provider
 from color_book_generator.providers.base import generate_matching
@@ -558,12 +559,18 @@ def _extra_page_images(
 
 def _write_page_assets(state: SessionState, page: PageState, img: Image.Image) -> None:
     cfg = _session_cfg(state)
+    has_embedded_text = state.caption_enabled and bool(page.caption_text.strip())
+    processing = (
+        cfg.processing.model_copy(
+            update={"min_component_px": min(cfg.processing.min_component_px, 12)}
+        )
+        if has_embedded_text
+        else cfg.processing
+    )
     processed = prepare_page(
         img,
         cfg.image_px,
-        cfg.processing,
-        _session_caption(state),
-        page.caption_text,
+        processing,
     )
     name = f"page-{page.index:03d}.png"
     img.save(store.raw_dir(state.id) / name, "PNG")
@@ -1228,8 +1235,22 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
     seed = body.seed if body.seed is not None else cfg.seed
     candidates = body.candidates or cfg.candidates
     effective_layout = state.page_layout or default_page_layout_for_category(state.category)
+    embedded_text = page.caption_text.strip() if state.caption_enabled else ""
     full_prompt = compose_page_prompt(
-        context, page.prompt, index, len(state.pages), page_layout=effective_layout
+        context,
+        page.prompt,
+        index,
+        len(state.pages),
+        page_layout=effective_layout,
+        caption_text=embedded_text,
+        caption_position=state.caption_position,
+        caption_font_family=state.caption_font_family,
+        caption_font_bold=state.caption_font_bold,
+    )
+    negative_prompt = effective_negative_prompt(
+        cfg.negative_prompt,
+        has_embedded_text=bool(embedded_text),
+        page_layout=effective_layout,
     )
     # Enrich prompt with textual character descriptions for selected book characters
     char_notes = [
@@ -1263,7 +1284,7 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
                     state.model,
                     full_prompt,
                     cfg.image_px,
-                    cfg.negative_prompt,
+                    negative_prompt,
                     seed,
                     references,
                     style_reference,
