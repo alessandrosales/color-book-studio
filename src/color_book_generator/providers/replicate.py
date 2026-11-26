@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import httpx
@@ -15,6 +16,8 @@ from color_book_generator.providers.base import (
     pick_size,
     register,
 )
+
+_MODEL_RE = re.compile(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$")
 
 _AR: dict[str, tuple[int, int]] = {
     "1:1": (1024, 1024),
@@ -52,6 +55,8 @@ class ReplicateProvider(ImageProvider):
             raise ProviderError(
                 "este provedor nao suporta imagens de referencia; use o provedor codex"
             )
+        if not _MODEL_RE.match(self.model):
+            raise ProviderError(f"invalid replicate model identifier: {self.model!r}")
         w, h = pick_size(target_size, _AR)
         aspect = next(k for k, v in _AR.items() if v == (w, h))
         payload: dict[str, object] = {
