@@ -482,6 +482,29 @@
           </div>
 
           <div class="floating-card">
+            <h2>Logo da editora</h2>
+            <p class="hint hint-sm">
+              Aparece no rodapé da folha de rosto e da última página final. A logo vale para todos os livros da biblioteca.
+            </p>
+            <div class="publisher-logo-row">
+              <div class="publisher-logo-preview" id="publisher-logo-preview">
+                <span>Nenhuma logo enviada.</span>
+              </div>
+              <div class="publisher-logo-actions">
+                <label class="check-toggle">
+                  <input type="checkbox" id="publisher-logo-include" />
+                  <span>Usar a logo neste livro</span>
+                </label>
+                <div class="field-row field-row-file">
+                  <input id="publisher-logo-file" class="field field-file" type="file" accept="image/png,image/jpeg,image/webp" aria-label="Selecionar logo da editora" />
+                  <button class="btn btn-outline btn-sm" id="publisher-logo-upload" type="button">Enviar logo</button>
+                </div>
+                <button class="btn btn-danger-ghost btn-sm is-hidden" id="publisher-logo-remove" type="button">Remover logo</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="floating-card">
             <h2>Capa do livro</h2>
             <p class="hint hint-sm">
               Usa o estilo do livro, o roteiro e as referências de personagem. O título é aplicado em uma faixa na base da arte.

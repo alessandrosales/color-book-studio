@@ -1940,6 +1940,42 @@ textarea.field {
   max-height: none;
 }
 
+.publisher-logo-row {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.publisher-logo-preview {
+  width: 160px;
+  height: 96px;
+  border-radius: 12px;
+  background: var(--surface-subtle);
+  border: 1.5px dashed var(--line-strong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 10px;
+  color: var(--ink-muted);
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.publisher-logo-preview img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.publisher-logo-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+}
+
 /* Wide desktop utilization */
 @media (min-width: 1920px) {
   .page-list {

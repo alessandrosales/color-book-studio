@@ -305,6 +305,7 @@ class SessionPatch(BaseModel):
     include_title_page: bool | None = None
     include_belongs_to_page: bool | None = None
     include_color_test_page: bool | None = None
+    include_publisher_logo: bool | None = None
     cover_include: bool | None = None
     cover_color: bool | None = None
     cover_title: str | None = None
@@ -403,6 +404,8 @@ class SessionView(BaseModel):
     cover_download_url: str | None = None
     front_extra_pages: list[ExtraPageView] = Field(default_factory=list)
     back_extra_pages: list[ExtraPageView] = Field(default_factory=list)
+    include_publisher_logo: bool = True
+    publisher_logo_url: str | None = None
     current_step: int = 1
 
 
@@ -513,6 +516,8 @@ def _session_view(state: SessionState) -> SessionView:
         back_extra_pages=[
             _extra_page_view(state.id, page) for page in state.back_extra_pages
         ],
+        include_publisher_logo=state.include_publisher_logo,
+        publisher_logo_url=_publisher_logo_url(),
         current_step=state.current_step,
     )
 
@@ -683,6 +688,52 @@ def style_image() -> FileResponse:
     path = store.style_path()
     if not path.exists():
         raise HTTPException(status_code=404, detail="estilo nao definido")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+def _publisher_logo_url() -> str | None:
+    path = store.publisher_logo_path()
+    if not path.exists():
+        return None
+    return f"/api/publisher-logo/image?v={int(path.stat().st_mtime)}"
+
+
+class PublisherLogoView(BaseModel):
+    url: str | None = None
+
+
+@app.get("/api/publisher-logo", response_model=PublisherLogoView)
+def get_publisher_logo() -> PublisherLogoView:
+    return PublisherLogoView(url=_publisher_logo_url())
+
+
+@app.post("/api/publisher-logo", response_model=PublisherLogoView)
+async def set_publisher_logo(image: UploadFile = File(...)) -> PublisherLogoView:
+    data = await read_upload_limited(image)
+    if not data:
+        raise HTTPException(status_code=400, detail="envie uma imagem")
+    try:
+        with Image.open(io.BytesIO(data)) as source:
+            source.load()
+            normalized = source.convert("RGBA")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="arquivo nao e uma imagem valida") from exc
+    path = store.publisher_logo_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    normalized.save(path, "PNG")
+    return PublisherLogoView(url=_publisher_logo_url())
+
+
+@app.delete("/api/publisher-logo", status_code=204)
+def delete_publisher_logo() -> None:
+    store.publisher_logo_path().unlink(missing_ok=True)
+
+
+@app.get("/api/publisher-logo/image")
+def publisher_logo_image() -> FileResponse:
+    path = store.publisher_logo_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="logo da editora nao definida")
     return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
@@ -1183,6 +1234,9 @@ def patch_session(sid: str, body: SessionPatch) -> SessionView:
     if body.include_color_test_page is not None:
         state.include_color_test_page = body.include_color_test_page
         state.pdf_ready = False
+    if body.include_publisher_logo is not None:
+        state.include_publisher_logo = body.include_publisher_logo
+        state.pdf_ready = False
     if body.cover_include is not None:
         state.cover_include = body.cover_include
         state.pdf_ready = False
@@ -1386,6 +1440,7 @@ def compose(sid: str) -> SessionView:
         front_extra_images=_extra_page_images(state, "front"),
         back_extra_images=_extra_page_images(state, "back"),
         synopsis=state.story_synopsis,
+        publisher_logo=store.publisher_logo_for(state),
     )
     state.pdf_ready = True
     store.save_session(state)
@@ -1465,6 +1520,7 @@ def export_kdp_interior(sid: str) -> FileResponse:
                 front_extra_images=_extra_page_images(state, "front"),
                 back_extra_images=_extra_page_images(state, "back"),
                 synopsis=state.story_synopsis,
+                publisher_logo=store.publisher_logo_for(state),
             )
         except BaseException:
             path.unlink(missing_ok=True)

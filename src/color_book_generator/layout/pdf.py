@@ -17,7 +17,26 @@ def _page_dimensions_pt(cfg: BookConfig) -> tuple[float, float]:
     return cfg.page_size_pt
 
 
-def _draw_page_image(c: canvas.Canvas, image_path: Path, cfg: BookConfig) -> None:
+def _draw_logo(c: canvas.Canvas, logo: Path, center_x: float, bottom_y: float, max_h: float) -> float:
+    """Draw the publisher logo centred at ``center_x``; return the height it used."""
+    reader = ImageReader(str(logo))
+    img_w, img_h = reader.getSize()
+    if img_w <= 0 or img_h <= 0:
+        return 0.0
+    height = max_h
+    width = height * img_w / img_h
+    max_w = 2.2 * inch
+    if width > max_w:
+        width, height = max_w, max_w * img_h / img_w
+    c.drawImage(
+        reader, center_x - width / 2, bottom_y, width=width, height=height, mask="auto"
+    )
+    return height
+
+
+def _draw_page_image(
+    c: canvas.Canvas, image_path: Path, cfg: BookConfig, logo: Path | None = None
+) -> None:
     """Draw one processed page so it covers exactly the PDF page (same size on every page)."""
     page_w, page_h = _page_dimensions_pt(cfg)
     c.drawImage(
@@ -29,6 +48,8 @@ def _draw_page_image(c: canvas.Canvas, image_path: Path, cfg: BookConfig) -> Non
         preserveAspectRatio=True,
         anchor="c",
     )
+    if logo is not None:
+        _draw_logo(c, logo, page_w / 2, 0.75 * inch, 0.55 * inch)
     c.showPage()
 
 
@@ -52,7 +73,9 @@ def _wrap_pdf_lines(
     return lines
 
 
-def _draw_title_page(c: canvas.Canvas, cfg: BookConfig, synopsis: str = "") -> None:
+def _draw_title_page(
+    c: canvas.Canvas, cfg: BookConfig, synopsis: str = "", logo: Path | None = None
+) -> None:
     page_w, page_h = _page_dimensions_pt(cfg)
     c.setFillColorRGB(0, 0, 0)
     c.setStrokeColorRGB(0, 0, 0)
@@ -83,7 +106,7 @@ def _draw_title_page(c: canvas.Canvas, cfg: BookConfig, synopsis: str = "") -> N
             c.drawCentredString(page_w / 2, sub_y - j * 18.0, sline)
         text_bottom = sub_y - len(sub_lines) * 18.0
 
-    author_y = page_h * 0.14
+    author_y = page_h * (0.19 if logo is not None else 0.14)
     clean_synopsis = synopsis.strip()
     if clean_synopsis:
         syn_max_w = page_w - 2 * inset - 1.2 * inch
@@ -108,6 +131,8 @@ def _draw_title_page(c: canvas.Canvas, cfg: BookConfig, synopsis: str = "") -> N
     if cfg.author:
         c.setFont("Helvetica", 13)
         c.drawCentredString(page_w / 2, author_y, cfg.author)
+    if logo is not None:
+        _draw_logo(c, logo, page_w / 2, inset + 0.2 * inch, 0.6 * inch)
     c.showPage()
 
 
@@ -190,6 +215,7 @@ def compose_pdf(
     front_extra_images: list[Path] | None = None,
     back_extra_images: list[Path] | None = None,
     synopsis: str = "",
+    publisher_logo: Path | None = None,
 ) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     page_w, page_h = _page_dimensions_pt(cfg)
@@ -219,7 +245,7 @@ def compose_pdf(
     if cover_image is not None and cover_image.exists():
         _draw_page_image(c, cover_image, cfg)
     if include_title_page:
-        _draw_title_page(c, cfg, synopsis)
+        _draw_title_page(c, cfg, synopsis, publisher_logo)
     if belongs_to:
         _draw_belongs_to_page(c, cfg)
     if color_test:
@@ -238,8 +264,9 @@ def compose_pdf(
         if blank_verso:
             c.showPage()
 
-    for extra in back_extra_images or []:
-        _draw_page_image(c, extra, cfg)
+    back = back_extra_images or []
+    for position, extra in enumerate(back, start=1):
+        _draw_page_image(c, extra, cfg, publisher_logo if position == len(back) else None)
 
     c.save()
     return out_path

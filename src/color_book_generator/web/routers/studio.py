@@ -1803,6 +1803,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 front_extra_images=_extra_page_images(state, "front"),
                 back_extra_images=_extra_page_images(state, "back"),
                 synopsis=state.story_synopsis,
+                publisher_logo=store.publisher_logo_for(state),
             )
             state.pdf_ready = True
             store.save_session(state)

@@ -936,7 +936,26 @@ function renderStage5Finalize() {
 
   renderExtraPageList(s.front_extra_pages || [], $("#front-extra-list"), $("#front-extra-empty"));
   renderExtraPageList(s.back_extra_pages || [], $("#back-extra-list"), $("#back-extra-empty"));
+  renderPublisherLogo(s);
 }
+
+function renderPublisherLogo(s) {
+  $("#publisher-logo-include").checked = s.include_publisher_logo !== false;
+  const preview = $("#publisher-logo-preview");
+  preview.innerHTML = "";
+  if (s.publisher_logo_url) {
+    const img = document.createElement("img");
+    img.src = s.publisher_logo_url;
+    img.alt = "Logo da editora";
+    preview.appendChild(img);
+  } else {
+    const span = document.createElement("span");
+    span.textContent = "Nenhuma logo enviada.";
+    preview.appendChild(span);
+  }
+  $("#publisher-logo-remove").classList.toggle("is-hidden", !s.publisher_logo_url);
+}
+
 
 function renderAll() {
   renderHeaderAndStepper();
@@ -1761,6 +1780,46 @@ function bindEvents() {
       toast(err.message, true);
     }
   };
+
+  $("#publisher-logo-upload").addEventListener("click", async () => {
+    const file = $("#publisher-logo-file").files[0];
+    if (!file) {
+      toast("Escolha a imagem da logo.", true);
+      return;
+    }
+    const form = new FormData();
+    form.append("image", file);
+    try {
+      await api("/api/publisher-logo", { method: "POST", body: form });
+      $("#publisher-logo-file").value = "";
+      await reloadSession();
+      toast("Logo da editora salva.");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+  $("#publisher-logo-remove").addEventListener("click", async () => {
+    try {
+      await api("/api/publisher-logo", { method: "DELETE" });
+      await reloadSession();
+      toast("Logo removida.");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+  $("#publisher-logo-include").addEventListener("change", async () => {
+    try {
+      state.session = await api(`/api/sessions/${state.sid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ include_publisher_logo: $("#publisher-logo-include").checked }),
+      });
+      renderHeaderAndStepper();
+      renderStage5Finalize();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
   $("#add-front-extra-btn").addEventListener("click", () => addExtraPage("front"));
   $("#add-back-extra-btn").addEventListener("click", () => addExtraPage("back"));
 

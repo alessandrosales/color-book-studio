@@ -180,6 +180,7 @@ class SessionState(BaseModel):
     cover_updated_at: datetime | None = None
     front_extra_pages: list[ExtraPage] = Field(default_factory=list)
     back_extra_pages: list[ExtraPage] = Field(default_factory=list)
+    include_publisher_logo: bool = True
     current_step: int = 1
 
     # JSON snapshot of what this object last read from / wrote to disk. Used by
@@ -249,6 +250,16 @@ def load_style_bytes() -> bytes | None:
 
 def clear_style() -> None:
     style_path().unlink(missing_ok=True)
+
+
+def publisher_logo_path() -> Path:
+    """Publisher (imprint) logo shared by every book in this library."""
+    return WEB_ROOT / "publisher" / "logo.png"
+
+
+def publisher_logo_for(state: SessionState) -> Path | None:
+    path = publisher_logo_path()
+    return path if state.include_publisher_logo and path.exists() else None
 
 
 def session_style_dir(sid: str) -> Path:

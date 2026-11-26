@@ -849,3 +849,44 @@ def test_autopilot_cancel_and_resume_from_where_it_stopped(
     final_session = client.get(f"/api/sessions/{sid}").json()
     assert [p["status"] for p in final_session["pages"]] == ["done", "done", "done"]
     assert final_session["pdf_ready"] is True
+
+
+def test_publisher_logo_upload_and_pdf(tmp_path: Path) -> None:
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    sid = session["id"]
+    assert client.get(f"/api/sessions/{sid}").json()["publisher_logo_url"] is None
+
+    up = client.post(
+        "/api/publisher-logo", files={"image": ("logo.png", _png_bytes(), "image/png")}
+    )
+    assert up.status_code == 200, up.text
+    view = client.get(f"/api/sessions/{sid}").json()
+    assert view["publisher_logo_url"] and view["include_publisher_logo"] is True
+    assert client.get(view["publisher_logo_url"]).status_code == 200
+
+    state = store.load_session(sid)
+    assert state is not None
+    assert store.publisher_logo_for(state) == store.publisher_logo_path()
+    off = client.patch(f"/api/sessions/{sid}", json={"include_publisher_logo": False})
+    assert off.json()["include_publisher_logo"] is False
+    state = store.load_session(sid)
+    assert state is not None and store.publisher_logo_for(state) is None
+
+    page = tmp_path / "p.png"
+    Image.new("L", (400, 500), 255).save(page)
+    out = compose_pdf(
+        [page],
+        tmp_path / "book.pdf",
+        BookConfig(title="Logo"),
+        back_extra_images=[page],
+        publisher_logo=store.publisher_logo_path(),
+    )
+    reader = PdfReader(str(out))
+    assert len(reader.pages) == 3
+    title_images = reader.pages[0].images
+    assert len(title_images) == 1
+
+    assert client.delete("/api/publisher-logo").status_code == 204
+    assert client.get(f"/api/sessions/{sid}").json()["publisher_logo_url"] is None
