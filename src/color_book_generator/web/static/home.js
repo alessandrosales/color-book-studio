@@ -302,6 +302,7 @@ function renderBooks({ animate = false } = {}) {
     const catLabel = CATEGORY_LABEL[book.category] || book.category || "Colorir";
     const isChecked = state.selectedBookIds.has(book.id);
     if (isChecked) li.classList.add("is-selected");
+    li.dataset.bookId = book.id;
     li.innerHTML = `
       <div class="book-cover-wrap">
         <label class="book-select-box" title="Selecionar para exportar">
@@ -310,6 +311,10 @@ function renderBooks({ animate = false } = {}) {
         <a class="book-cover" href="/books/${book.id}" aria-label="Abrir livro">
           ${coverHtml}
         </a>
+        <div class="book-gen-overlay is-hidden" aria-hidden="true">
+          <div class="spinner"></div>
+          <strong class="book-gen-pct"></strong>
+        </div>
       </div>
       <div class="book-body">
         <div class="book-head-row">
@@ -319,6 +324,7 @@ function renderBooks({ animate = false } = {}) {
         <div class="book-progress-track" title="${pct}% concluído">
           <div class="book-progress-fill" style="width: ${pct}%;"></div>
         </div>
+        <p class="book-gen-label is-hidden" role="status" aria-live="polite"></p>
         <div class="book-meta-line">
           <span>${book.done}/${book.pages} págs</span>
           <span>${formatPageSize(book.page_size)}</span>
@@ -335,6 +341,7 @@ function renderBooks({ animate = false } = {}) {
     `;
     li.querySelector(".book-title").textContent = book.title;
     li.querySelector(".book-cat-pill").textContent = catLabel;
+    applyAutopilotToCard(li, book);
     li.querySelector(".book-select-input").addEventListener("change", (ev) => {
       if (ev.target.checked) {
         state.selectedBookIds.add(book.id);
@@ -361,6 +368,89 @@ function renderBooks({ animate = false } = {}) {
 
   updateSelectionBar();
   if (animate) animateBooks();
+}
+
+const GEN_STATE_TEXT = {
+  error: "A geração parou com erro. Abra o livro para continuar de onde parou.",
+  cancelled: "Geração cancelada. Abra o livro para continuar de onde parou.",
+};
+
+function applyAutopilotToCard(li, book) {
+  const ap = book.autopilot;
+  const running = ap?.status === "running";
+  const overlay = li.querySelector(".book-gen-overlay");
+  const label = li.querySelector(".book-gen-label");
+  const fill = li.querySelector(".book-progress-fill");
+  const track = li.querySelector(".book-progress-track");
+  li.classList.toggle("is-generating", running);
+  li.classList.toggle("is-gen-stopped", Boolean(ap) && !running);
+  overlay.classList.toggle("is-hidden", !running);
+  label.classList.toggle("is-hidden", !ap);
+  if (!ap) {
+    const pct = book.pages ? Math.round((book.done / book.pages) * 100) : 0;
+    fill.style.width = `${pct}%`;
+    track.title = `${pct}% concluído`;
+    return;
+  }
+  const pct = Math.max(0, Math.min(100, ap.percent || 0));
+  fill.style.width = `${running ? pct : (book.pages ? Math.round((book.done / book.pages) * 100) : 0)}%`;
+  track.title = running ? `Gerando: ${pct}%` : "Geração interrompida";
+  li.querySelector(".book-gen-pct").textContent = `${pct}%`;
+  label.textContent = running
+    ? ap.label || "Gerando livro…"
+    : `${GEN_STATE_TEXT[ap.status] || ap.label || ""}${ap.error ? ` (${ap.error})` : ""}`;
+}
+
+let generationTimer = null;
+
+function scheduleGenerationPolling() {
+  const anyRunning = state.books.some((b) => b.autopilot?.status === "running");
+  if (anyRunning && !generationTimer) {
+    generationTimer = setInterval(pollGeneration, 2500);
+  } else if (!anyRunning && generationTimer) {
+    clearInterval(generationTimer);
+    generationTimer = null;
+  }
+}
+
+async function pollGeneration() {
+  let books;
+  try {
+    books = await api("/api/sessions");
+  } catch (_) {
+    return;
+  }
+  const wasRunning = new Set(
+    state.books.filter((b) => b.autopilot?.status === "running").map((b) => b.id)
+  );
+  const sameList =
+    books.length === state.books.length && books.every((b, i) => b.id === state.books[i].id);
+  state.books = books;
+  const finished = books.filter((b) => wasRunning.has(b.id) && b.autopilot?.status !== "running");
+  if (!sameList || finished.length) {
+    renderBooks();
+  } else {
+    for (const book of books) {
+      const li = document.querySelector(`.book-card[data-book-id="${book.id}"]`);
+      if (!li) continue;
+      li.querySelector(".book-title").textContent = book.title;
+      li.querySelector(".book-meta-line span").textContent = `${book.done}/${book.pages} págs`;
+      applyAutopilotToCard(li, book);
+    }
+  }
+  for (const book of finished) {
+    if (book.autopilot) toast(`"${book.title}": a geração parou. Abra o livro para continuar.`, true);
+    else toast(`"${book.title}" está pronto!`);
+  }
+  scheduleGenerationPolling();
+}
+
+function focusGeneratingBook(id) {
+  const li = document.querySelector(`.book-card[data-book-id="${id}"]`);
+  if (!li) return;
+  li.scrollIntoView({ behavior: "smooth", block: "center" });
+  li.classList.add("is-just-started");
+  setTimeout(() => li.classList.remove("is-just-started"), 2400);
 }
 
 function updateSelectionBar() {
@@ -437,7 +527,6 @@ function toggleCreator(open) {
   }
   if (shouldOpen) {
     animateDrawerOpen(form);
-    $("#book-title").focus();
   }
 }
 
@@ -446,8 +535,8 @@ async function createBook(ev, { autopilot = false } = {}) {
   const errEl = $("#new-book-error");
   errEl.classList.add("is-hidden");
   const preset = state.presets.find((p) => p.id === state.selectedPresetId);
-  const rawTitle = $("#book-title").value.trim();
-  const title = rawTitle || (preset ? `Novo livro ${preset.name}` : "Novo Livro de Colorir");
+  // The final title is written by the autopilot once the story is finished.
+  const title = preset ? `Novo livro ${preset.name}` : "Novo Livro de Colorir";
   const pages = Math.max(1, Math.min(200, Number($("#book-pages").value) || 12));
   const premise = $("#book-premise").value.trim();
   const language = $("#book-language")?.value || "en";
@@ -506,6 +595,12 @@ async function createBook(ev, { autopilot = false } = {}) {
           stop_after: "pdf",
         }),
       });
+      // Generation runs in the background: follow it from the library card.
+      toggleCreator(false);
+      await loadBooks();
+      focusGeneratingBook(created.id);
+      toast("Geração iniciada. Acompanhe o progresso no card do livro.");
+      return;
     }
     window.location.href = `/books/${created.id}`;
   } catch (err) {
@@ -609,6 +704,7 @@ async function importBackup() {
 async function loadBooks({ animate = false } = {}) {
   state.books = await api("/api/sessions");
   renderBooks({ animate });
+  scheduleGenerationPolling();
 }
 
 async function loadPresets() {
@@ -641,6 +737,12 @@ async function init() {
     refreshAuth(),
   ]);
   state.defaults = defaults;
+  const startedId = new URLSearchParams(window.location.search).get("gerando");
+  if (startedId) {
+    history.replaceState(null, "", window.location.pathname);
+    focusGeneratingBook(startedId);
+    toast("Geração iniciada. Acompanhe o progresso no card do livro.");
+  }
   renderBookProviders();
   renderBookCaptionUI();
 

@@ -54,11 +54,13 @@ from color_book_generator.web import store
 from color_book_generator.web.auth_flow import flow as codex_flow
 from color_book_generator.web.routers.presets import router as presets_router
 from color_book_generator.web.routers.studio import (
+    AutopilotStatus,
     BookCharacterView,
     ExtraPageView,
     _extra_page_view,
     _render_extra_page,
     _style_anchor_view,
+    autopilot_snapshot,
     read_upload_limited,
 )
 from color_book_generator.web.routers.studio import (
@@ -236,6 +238,7 @@ class SessionSummary(BaseModel):
     category: str = "cozy"
     page_size: str = "letter_8.5x11"
     characters_count: int = 0
+    autopilot: AutopilotStatus | None = None
 
 
 class CodexModels(BaseModel):
@@ -1165,6 +1168,7 @@ def list_sessions() -> list[SessionSummary]:
                 category=state.category,
                 page_size=state.page_size,
                 characters_count=len(state.characters),
+                autopilot=autopilot_snapshot(state.id),
             )
         )
     summaries.sort(

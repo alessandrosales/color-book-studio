@@ -1076,3 +1076,28 @@ def test_cover_prompt_letters_the_exact_title_in_the_art() -> None:
     assert "japanese text" not in negative and "speech bubble" not in negative
     assert ", text," not in f", {negative},"
     assert "watermark" in negative and "misspelled title" in negative
+
+
+def test_library_lists_running_generation_progress() -> None:
+    from color_book_generator.web.routers import studio as studio_mod
+
+    sid = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()["id"]
+    studio_mod._set_autopilot(
+        sid, status="running", phase="pages", label="Ilustrando página 1 de 1…",
+        percent=42, current_step=3,
+    )
+    try:
+        book = next(b for b in client.get("/api/sessions").json() if b["id"] == sid)
+        assert book["autopilot"]["status"] == "running"
+        assert book["autopilot"]["percent"] == 42
+        assert book["autopilot"]["label"] == "Ilustrando página 1 de 1…"
+
+        studio_mod._set_autopilot(
+            sid, status="done", phase="done", label="ok", percent=100, current_step=4
+        )
+        book = next(b for b in client.get("/api/sessions").json() if b["id"] == sid)
+        assert book["autopilot"] is None
+    finally:
+        studio_mod._autopilot_status.pop(sid, None)

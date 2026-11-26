@@ -990,6 +990,46 @@ textarea.field {
   box-shadow: 0 0 0 1px var(--accent);
 }
 
+.book-gen-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  background: rgba(255, 255, 255, 0.82);
+  backdrop-filter: blur(2px);
+  pointer-events: none;
+  color: var(--accent);
+  font-size: 1.05rem;
+}
+
+.book-gen-overlay .spinner {
+  margin-bottom: 8px;
+}
+
+.book-gen-label {
+  margin: 6px 0 0;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--ink-muted);
+}
+
+.book-card.is-generating .book-progress-fill {
+  transition: width 600ms ease;
+}
+
+.book-card.is-gen-stopped .book-gen-label {
+  color: var(--danger, #b42318);
+}
+
+.book-card.is-just-started {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 .book-cover {
   aspect-ratio: 4 / 3;
   background: var(--stage-1-bg);

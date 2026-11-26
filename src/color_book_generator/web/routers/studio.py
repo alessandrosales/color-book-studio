@@ -2153,6 +2153,12 @@ def _run_autopilot_thread(sid: str, req: AutopilotRequest) -> None:
         _autopilot_threads.pop(sid, None)
 
 
+def autopilot_snapshot(sid: str) -> AutopilotStatus | None:
+    """Current autopilot state of a book for the library, or None when idle/finished."""
+    status = _autopilot_status.get(sid)
+    if status is None or status.status in {"idle", "done"}:
+        return None
+    return status.model_copy()
 
 
 @router.post("/autopilot", response_model=AutopilotStatus, status_code=202)

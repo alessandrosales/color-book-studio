@@ -1249,6 +1249,11 @@ async function triggerAutopilot(stopAfter, { resume = false, redoFinishing = fal
         redo_finishing: redoFinishing,
       }),
     });
+    if (stopAfter === "pdf") {
+      // Full generation takes a while: follow it from the library card.
+      window.location.href = `/?gerando=${encodeURIComponent(state.sid)}`;
+      return;
+    }
     renderAutopilot(st);
     if (!state.autopilotTimer) {
       state.autopilotTimer = setInterval(pollAutopilot, 1800);
