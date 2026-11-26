@@ -16,7 +16,7 @@ from color_book_generator.paths import RunPaths, make_run_dir
 from color_book_generator.processing.line_art import prepare_page
 from color_book_generator.prompts import build_page_prompts
 from color_book_generator.providers import get_provider
-from color_book_generator.providers.base import ProviderError
+from color_book_generator.providers.base import ProviderError, generate_matching
 
 PageCallback = Callable[[int, int], None]
 MessageCallback = Callable[[str], None]
@@ -157,10 +157,11 @@ def _generate_best(provider, cfg: BookConfig, prompt: str, negative: str) -> Ima
     best: Image.Image | None = None
     best_score = float("-inf")
     for _ in range(cfg.candidates):
-        img = provider.generate(
+        img = generate_matching(
+            provider,
             prompt,
-            negative_prompt=negative,
             target_size=cfg.image_px,
+            negative_prompt=negative,
             seed=cfg.seed,
         )
         processed = prepare_page(img, cfg.image_px, cfg.processing)

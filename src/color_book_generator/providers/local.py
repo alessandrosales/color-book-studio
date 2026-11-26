@@ -31,8 +31,13 @@ class LocalProvider(ImageProvider):
             raise ProviderError(
                 "local extra not installed: uv sync --extra local"
             ) from exc
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
-        dtype = torch.float16 if device == "mps" else torch.float32
+        if torch.cuda.is_available():
+            device = "cuda"
+        elif torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
+        dtype = torch.float16 if device in {"cuda", "mps"} else torch.float32
         pipe = AutoPipelineForText2Image.from_pretrained(
             self.model, torch_dtype=dtype, use_safetensors=True
         ).to(device)

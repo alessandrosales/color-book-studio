@@ -34,21 +34,48 @@ ORIGINATOR = "color-book-generator"
 
 # Offline fallback when live catalog discovery is unavailable. Live discovery wins.
 DEFAULT_CODEX_MODELS = [
-    "gpt-6.2-sol",
-    "gpt-6.2-astra",
-    "gpt-6.1-sol",
-    "gpt-6.1-terra",
-    "gpt-6-sol",
-    "gpt-6-luna",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
     "gpt-5.4-mini",
     "gpt-5.4",
+    "gpt-5.5",
+    "gpt-5.6-luna",
+    "gpt-5.6-terra",
+    "gpt-5.6-sol",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-6.1-terra",
+    "gpt-6.1-sol",
+    "gpt-6.2-astra",
+    "gpt-6.2-sol",
 ]
 
 DEFAULT_CODEX_MODEL = os.getenv("CBG_CODEX_MODEL", DEFAULT_CODEX_MODELS[0])
+
+
+def _cost_tier(slug: str) -> tuple[int, int]:
+    """Lower tuple = cheaper/lighter model."""
+    low = slug.lower()
+    if any(tok in low for tok in ("nano", "spark", "lite", "flash")):
+        return (0, len(low))
+    if "mini" in low:
+        return (1, len(low))
+    if any(tok in low for tok in ("luna", "fast", "small")):
+        return (2, len(low))
+    if "terra" in low:
+        return (3, len(low))
+    return (4, len(low))
+
+
+def cheapest_codex_model(slugs: list[str] | None = None) -> str:
+    """Return the lowest-cost model from a catalog list (or default cheapest)."""
+    items = [s for s in (slugs or []) if isinstance(s, str) and s.strip()]
+    if not items:
+        return DEFAULT_CODEX_MODEL
+    # Stable sort by cost tier, preferring later (typically lighter) items on ties
+    ranked = sorted(
+        enumerate(items),
+        key=lambda pair: (_cost_tier(pair[1])[0], -pair[0]),
+    )
+    return ranked[0][1]
 DEFAULT_IMAGE_MODEL = os.getenv("CBG_CODEX_IMAGE_MODEL", "gpt-image-2")
 DEFAULT_IMAGE_QUALITY = os.getenv("CBG_CODEX_IMAGE_QUALITY", "medium")
 FALLBACK_SIZE = "1024x1024"
@@ -295,41 +322,110 @@ def _codex_headers(access_token: str) -> dict[str, str]:
     return headers
 
 
+def _text_payload(
+    model: str | None,
+    instructions: str,
+    content: list[dict[str, str]],
+) -> bytes:
+    payload: dict[str, Any] = {
+        "model": normalize_codex_model(model),
+        "store": False,
+        "instructions": instructions,
+        "input": [{"type": "message", "role": "user", "content": content}],
+        "stream": True,
+    }
+    return json.dumps(payload).encode()
+
+
+def _extract_response_text(event_stream: str) -> str | None:
+    deltas: list[str] = []
+    done_text: str | None = None
+    completed_text: str | None = None
+
+    for line in event_stream.splitlines():
+        if not line.startswith("data:"):
+            continue
+        raw = line.removeprefix("data:").strip()
+        if not raw or raw == "[DONE]":
+            continue
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+
+        etype = event.get("type")
+        if etype == "response.output_text.delta" and isinstance(event.get("delta"), str):
+            deltas.append(event["delta"])
+        elif etype == "response.output_text.done" and isinstance(event.get("text"), str):
+            if event["text"].strip():
+                done_text = event["text"]
+        elif etype == "response.completed" and isinstance(event.get("response"), dict):
+            resp = event["response"]
+            if isinstance(resp.get("output_text"), str) and resp["output_text"].strip():
+                completed_text = resp["output_text"]
+            else:
+                parts: list[str] = []
+                for item in resp.get("output", []):
+                    if not isinstance(item, dict) or item.get("type") != "message":
+                        continue
+                    for part in item.get("content", []):
+                        if (
+                            isinstance(part, dict)
+                            and part.get("type") in {"output_text", "text"}
+                            and isinstance(part.get("text"), str)
+                        ):
+                            parts.append(part["text"])
+                if parts:
+                    completed_text = "".join(parts)
+
+    if done_text:
+        return done_text
+    if completed_text:
+        return completed_text
+    joined = "".join(deltas).strip()
+    return joined or None
+
+
 def create_response(
     model: str,
     instructions: str,
     content: list[dict[str, str]],
     auth_path: Path | None = None,
 ) -> str:
-    """Text-only helper for the Codex responses endpoint."""
+    """Text-only helper for the Codex responses endpoint (SSE streaming)."""
     access_token = get_access_token(auth_path)
+    resolved = resolve_codex_model(model, auth_path)
+    slugs = available_models(auth_path)
+    candidates = [resolved, *[slug for slug in slugs if slug != resolved][:2]]
     headers = _codex_headers(access_token)
-    headers["Accept"] = "application/json"
-    payload = {
-        "model": model,
-        "store": False,
-        "instructions": instructions,
-        "input": [{"type": "message", "role": "user", "content": content}],
-    }
-    status, response = _post(
-        CODEX_RESPONSES_URL, json.dumps(payload).encode(), headers
-    )
-    if status != 200:
-        raise CodexAuthError(
-            "A solicitacao ao ChatGPT Plus falhou. Tente autenticar novamente."
-        )
-    output_text = response.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
-        return output_text
-    for item in response.get("output", []):
-        if item.get("type") != "message":
-            continue
-        for part in item.get("content", []):
-            if part.get("type") in {"output_text", "text"} and isinstance(
-                part.get("text"), str
-            ):
-                return cast(str, part["text"])
-    raise CodexAuthError("O ChatGPT Plus nao retornou conteudo para a solicitacao.")
+
+    event_stream = ""
+    last_error: CodexRequestError | None = None
+    for candidate in candidates:
+        try:
+            event_stream = _post_stream(
+                CODEX_RESPONSES_URL,
+                _text_payload(candidate, instructions, content),
+                headers,
+                timeout=120,
+            )
+            break
+        except CodexRequestError as error:
+            if error.status != 400:
+                raise
+            last_error = error
+
+    if not event_stream:
+        if last_error:
+            raise last_error
+        raise CodexAuthError("O ChatGPT Plus nao retornou resposta para a solicitacao.")
+
+    text = _extract_response_text(event_stream)
+    if text:
+        return text
+    raise CodexAuthError("O ChatGPT Plus nao retornou conteudo de texto para a solicitacao.")
 
 
 def _post_stream(url: str, payload: bytes, headers: dict[str, str], timeout: int) -> str:

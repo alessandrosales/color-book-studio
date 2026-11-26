@@ -75,10 +75,13 @@ def to_line_art(img: Image.Image, cfg: ProcessingConfig) -> Image.Image:
 
 
 def fit_to_page(img: Image.Image, target_px: tuple[int, int], cfg: ProcessingConfig) -> Image.Image:
-    """Crop to content, scale up to fit the page with a safe margin, pad to exact size."""
+    """Optionally crop to content, scale to fit the page with a safe margin, pad to exact size."""
     bw = np.array(img)
-    x0, y0, x1, y1 = _content_bbox(bw)
-    cropped = Image.fromarray(bw[y0:y1, x0:x1], mode="L")
+    if cfg.crop_to_content:
+        x0, y0, x1, y1 = _content_bbox(bw)
+        cropped = Image.fromarray(bw[y0:y1, x0:x1], mode="L")
+    else:
+        cropped = Image.fromarray(bw, mode="L")
 
     tw, th = target_px
     margin = cfg.target_inner_margin_ratio

@@ -250,3 +250,34 @@ def test_available_models_picks_richest_client_version(monkeypatch) -> None:
     monkeypatch.setattr(codex, "_get", fake_get)
     assert codex.available_models() == ["best", "second"]
     codex._catalog_cache.clear()
+
+
+def test_create_response_streams_and_extracts_text(monkeypatch, tmp_path) -> None:
+    sse = "\n".join(
+        [
+            'data: {"type":"response.output_text.delta","delta":"{\\"title\\": "}',
+            'data: {"type":"response.output_text.delta","delta":"\\"Cozy\\"}"}',
+            'data: {"type":"response.output_text.done","text":"{\\"title\\": \\"Cozy\\"}"}',
+        ]
+    )
+    captured: dict[str, object] = {}
+
+    def fake_stream(url, payload, headers, timeout):
+        captured["payload"] = json.loads(payload)
+        captured["accept"] = headers.get("Accept")
+        return sse
+
+    monkeypatch.setattr(codex, "_post_stream", fake_stream)
+    monkeypatch.setattr(codex, "get_access_token", lambda *_a, **_k: "token")
+    monkeypatch.setattr(codex, "available_models", lambda *_a, **_k: ["gpt-5.4-mini"])
+
+    out = codex.create_response(
+        "gpt-5.4-mini",
+        "Return JSON",
+        [{"type": "input_text", "text": "hello"}],
+        auth_path=tmp_path / "auth.json",
+    )
+    assert out == '{"title": "Cozy"}'
+    assert isinstance(captured["payload"], dict)
+    assert captured["payload"]["stream"] is True
+    assert captured["accept"] == "text/event-stream"

@@ -65,10 +65,10 @@ class CodexProvider(ImageProvider):
                 f"{names}. Redraw them in the requested line-art style and ignore the "
                 "photo colors and lighting."
             )
-            image_urls = [
+            image_urls.extend(
                 "data:image/png;base64," + base64.b64encode(data).decode("ascii")
                 for _name, data in references
-            ]
+            )
         w, h = pick_size(target_size, _SIZES)
         try:
             data = create_image(
