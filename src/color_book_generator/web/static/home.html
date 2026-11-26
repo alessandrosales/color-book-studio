@@ -3,96 +3,171 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Color Book Studio — Livros</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2317171a'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%23f6f4ef' stroke-width='2'/%3E%3C/svg%3E" />
+    <title>Color Book Studio — Workspace</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232b1846'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23e6dcf5' stroke-width='2.4'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/static/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js" integrity="sha384-g4NTh/Iv5PPU4xPyhEWqPcwtNXOvdaDI8LLnyYfyNZOjKJeYQyjzQ9X5275eBjpt" crossorigin="anonymous" defer></script>
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <span class="mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6">
-            <rect x="3" y="3" width="18" height="18" rx="3" />
-            <path d="M3 9h18M9 3v18" opacity=".45" />
-            <circle cx="15" cy="15" r="3.2" />
-          </svg>
-        </span>
-        <span class="brand-name">Color Book Studio</span>
-      </div>
-      <div class="meta" id="meta"><span>Biblioteca de livros</span></div>
-      <div class="topbar-actions">
-        <button class="btn btn-primary" id="new-book-toggle">Novo livro</button>
-      </div>
-    </header>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+              <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+            </svg>
+          </span>
+          <span>Color Book Studio</span>
+        </a>
 
-    <div class="server-banner is-hidden" id="server-banner">
-      Servidor desatualizado: reinicie <code>uv run cbg web</code> para carregar as últimas mudanças.
+        <div class="topbar-meta">
+          <button class="pill" id="auth-pill" type="button" title="Gerenciar conta ChatGPT Plus">
+            <span class="pill-dot"></span>
+            <span id="auth-pill-label">Verificando conta…</span>
+          </button>
+          <span class="pill" id="books-count">0 livros</span>
+        </div>
+
+        <div class="topbar-actions">
+          <button class="btn btn-outline btn-sm" id="backup-modal-open" type="button">Backup</button>
+          <button class="btn btn-primary btn-sm" id="new-book-toggle" type="button">+ Novo livro</button>
+        </div>
+      </header>
+
+      <div class="server-banner is-hidden" id="server-banner">
+        Servidor desatualizado: reinicie <code>uv run cbg web</code> para carregar as últimas mudanças.
+      </div>
+
+      <main class="workspace-main">
+        <!-- Workspace Toolbar -->
+        <section class="workspace-toolbar">
+          <div class="workspace-toolbar-left">
+            <h1 class="workspace-heading">Seus livros</h1>
+            <div class="chip-row" id="category-filters" role="group" aria-label="Filtrar por categoria">
+              <button class="chip is-active" type="button" data-cat-filter="all">Todos</button>
+              <button class="chip" type="button" data-cat-filter="cozy">Bold &amp; Easy</button>
+              <button class="chip" type="button" data-cat-filter="kids">Infantil</button>
+              <button class="chip" type="button" data-cat-filter="manga">Mangá</button>
+              <button class="chip" type="button" data-cat-filter="manhwa">Manhwa</button>
+              <button class="chip" type="button" data-cat-filter="kawaii">Kawaii</button>
+              <button class="chip" type="button" data-cat-filter="adult">Adulto</button>
+            </div>
+          </div>
+          <div class="workspace-toolbar-right">
+            <button class="btn btn-accent btn-sm is-hidden" id="export-selected-btn" type="button">Exportar selecionados (0)</button>
+            <button class="btn btn-ghost btn-sm is-hidden" id="clear-selection-btn" type="button">Limpar seleção</button>
+            <input id="book-search" class="field workspace-search" type="search" placeholder="Buscar livro…" aria-label="Buscar livro" />
+          </div>
+        </section>
+
+        <!-- Collapsible New Book Drawer (Stage 1 Lavender tone) -->
+        <form class="creator-drawer is-hidden" id="new-book-form">
+          <div class="creator-drawer-head">
+            <div>
+              <h2>Novo livro</h2>
+              <p class="hint">Selecione um estilo e gere o livro inteiro direto, ou comece em branco.</p>
+            </div>
+            <button class="btn btn-ghost btn-sm" type="button" id="book-cancel">Fechar</button>
+          </div>
+
+          <div id="home-style-picker"></div>
+
+          <div class="field-row">
+            <label class="field-label">
+              <span>Título</span>
+              <input id="book-title" class="field" type="text" placeholder="Opcional no modo automático" />
+            </label>
+            <label class="field-label">
+              <span>Páginas</span>
+              <input id="book-pages" class="field" type="number" min="1" max="200" value="12" />
+            </label>
+            <label class="field-label">
+              <span>Idioma</span>
+              <select id="book-language" class="field">
+                <option value="en" selected>English</option>
+                <option value="pt-BR">Português (BR)</option>
+                <option value="es">Español</option>
+              </select>
+            </label>
+            <label class="field-label">
+              <span>Tema</span>
+              <input id="book-premise" class="field" type="text" placeholder="Opcional" />
+            </label>
+          </div>
+
+          <div class="topbar-actions" style="flex-wrap: wrap;">
+            <button class="btn btn-accent btn-sm" type="button" id="book-autopilot">Gerar livro completo</button>
+            <button class="btn btn-primary btn-sm" type="submit" id="book-create">Criar rascunho</button>
+            <button class="btn btn-outline btn-sm" type="button" id="book-cancel-2">Cancelar</button>
+          </div>
+          <p class="error-msg is-hidden" id="new-book-error"></p>
+        </form>
+
+        <!-- Projects Grid -->
+        <section id="library-section">
+          <ul class="book-grid" id="book-grid"></ul>
+          <div class="empty-state is-hidden" id="empty-state">
+            <p id="empty-state-msg">Nenhum livro encontrado.</p>
+            <button class="btn btn-primary btn-sm" id="empty-create-btn" type="button">+ Novo livro</button>
+          </div>
+        </section>
+      </main>
     </div>
 
-    <main class="home">
-      <section class="home-head">
-        <div>
-          <h1>Seus livros</h1>
-          <p class="hint">
-            Cada livro guarda seu próprio contexto, páginas, personagens e padrões.
-          </p>
+    <!-- Backup Modal -->
+    <div class="modal-backdrop is-hidden" id="backup-modal" role="dialog" aria-modal="true" aria-label="Backup do workspace">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3>Backup do workspace</h3>
+          <button class="btn btn-ghost btn-sm" id="backup-modal-close" type="button">Fechar</button>
         </div>
-        <span class="progress-pill" id="books-count">0 livros</span>
-      </section>
-
-      <form class="new-book is-hidden" id="new-book-form">
-        <div class="new-book-fields">
-          <label class="mini-field grow">
-            <span>Título do livro</span>
-            <input id="book-title" class="field" type="text" spellcheck="false" required />
+        <p class="hint">Exporte ou restaure livros, presets, personagens e páginas em .zip (sem credenciais).</p>
+        <div style="display: flex; flex-direction: column; gap: 10px;">
+          <a class="btn btn-outline btn-block btn-sm" href="/api/export">Exportar tudo (.zip)</a>
+          <button class="btn btn-accent btn-block btn-sm is-hidden" id="modal-export-selected-btn" type="button">Exportar selecionados (0)</button>
+        </div>
+        <div style="border-top: 1px solid var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 10px;">
+          <label class="field-label">
+            <span>Restaurar arquivo de backup (.zip)</span>
+            <input id="import-file" class="field" style="padding: 7px 10px; font-size: 0.84rem;" type="file" accept=".zip,application/zip" />
           </label>
-          <label class="mini-field">
-            <span>Páginas</span>
-            <input id="book-pages" class="field" type="number" min="1" max="200" value="10" />
-          </label>
+          <button class="btn btn-primary btn-block btn-sm" id="import-btn" type="button">Importar backup</button>
+          <p class="error-msg is-hidden" id="backup-error" style="margin: 0;"></p>
         </div>
-        <p class="hint">
-          O novo livro começa com os padrões salvos da última sessão (contexto, provedor,
-          modelo, legenda e fonte). Você pode alterar tudo depois.
-        </p>
-        <div class="panel-actions">
-          <button class="btn btn-primary" type="submit" id="book-create">Criar livro</button>
-          <button class="btn btn-ghost" type="button" id="book-cancel">Cancelar</button>
-        </div>
-        <p class="error-msg is-hidden" id="new-book-error"></p>
-      </form>
-
-      <ul class="book-grid" id="book-grid"></ul>
-      <div class="empty-state is-hidden" id="empty-state">
-        <p>Nenhum livro ainda. Crie o primeiro ou importe um backup.</p>
       </div>
+    </div>
 
-      <section class="panel-block home-backup">
-        <div>
-          <h2>Backup</h2>
-          <p class="hint">
-            Exporta/importa todos os livros, imagens, personagens, estilo e padrões.
+    <!-- ChatGPT Plus Auth Modal -->
+    <div class="modal-backdrop is-hidden" id="auth-modal" role="dialog" aria-modal="true" aria-label="Conta ChatGPT Plus">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3>Conta ChatGPT Plus / Codex</h3>
+          <button class="btn btn-ghost btn-sm" id="auth-modal-close" type="button">Fechar</button>
+        </div>
+        <p class="hint">Autenticação local via device code para gerar roteiros, Character Sheets e páginas no provedor <code>codex</code>.</p>
+        <div class="auth-code-box is-hidden" id="codex-code">
+          <p style="margin: 0; font-size: 0.85rem;">
+            Abra <a id="codex-link" href="https://auth.openai.com/codex/device" target="_blank" rel="noopener">auth.openai.com/codex/device</a> e digite o código:
           </p>
+          <code id="codex-user-code"></code>
         </div>
-        <div class="home-backup-actions">
-          <a class="btn btn-outline" href="/api/export">Exportar tudo (.zip)</a>
-          <input id="import-file" class="field" type="file" accept=".zip,application/zip" />
-          <button class="btn btn-outline" id="import-btn">Importar backup</button>
-        </div>
-        <p class="error-msg is-hidden" id="backup-error"></p>
-      </section>
-    </main>
+        <p class="error-msg is-hidden" id="codex-error"></p>
+        <button class="btn btn-primary btn-block" id="codex-connect" type="button">Conectar ChatGPT</button>
+        <button class="btn btn-outline btn-block is-hidden" id="codex-logout" type="button">Desconectar conta</button>
+      </div>
+    </div>
 
     <div class="busy-overlay is-hidden" id="busy-overlay" role="status" aria-live="polite">
       <div class="busy-card">
-        <div class="spinner busy-spinner"></div>
-        <h3 id="busy-title">Importando backup…</h3>
-        <div class="busy-bar" id="busy-bar"><div class="busy-fill" id="busy-fill"></div></div>
+        <div class="spinner"></div>
+        <h3 id="busy-title" style="margin: 0;">Importando backup…</h3>
+        <div class="busy-bar"><div class="busy-fill" id="busy-fill"></div></div>
         <p class="busy-sub" id="busy-sub">Não feche esta página.</p>
       </div>
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/static/home.js" defer></script>
+    <script type="module" src="/static/home.js"></script>
   </body>
 </html>

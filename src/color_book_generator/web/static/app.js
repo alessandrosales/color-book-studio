@@ -1,28 +1,40 @@
-const $ = (sel) => document.querySelector(sel);
+import { syncAllPopoverSelects } from "/static/popover-select.js";
+import { renderStylePicker } from "/static/style-picker.js";
 
-function pathSessionId() {
-  const match = window.location.pathname.match(/^\/books\/([a-f0-9]{8,32})$/);
-  return match ? match[1] : null;
-}
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 const STATUS_LABEL = {
   pending: "pendente",
-  generating: "gerando",
-  done: "pronto",
+  generating: "gerando…",
+  done: "pronta",
+  error: "erro",
+};
+
+const SHEET_STATUS_LABEL = {
+  empty: "sem folha",
+  generating: "gerando…",
+  ready: "folha pronta",
   error: "erro",
 };
 
 const state = {
-  defaults: null,
+  sid: null,
   session: null,
-  busy: new Set(),
+  defaults: null,
+  presets: [],
+  categories: [],
+  globalCharacters: [],
   codex: null,
   codexModels: [],
-  settings: null,
-  characters: [],
-  sessions: [],
-  styleUrl: null,
+  codexCheapest: null,
   codexTimer: null,
+  currentStep: 1,
+  busyPages: new Set(),
+  lightboxItems: [],
+  lightboxIndex: -1,
+  autopilotTimer: null,
+  lastAutopilotPhase: "",
 };
 
 async function api(path, options = {}) {
@@ -60,1212 +72,1156 @@ function debounce(fn, ms) {
   };
 }
 
-function preferredProvider() {
-  const selected = $("#provider").value;
-  if (selected) return selected;
-  const useCodex = state.codex && state.codex.authenticated && !state.defaults.openai_configured;
-  return useCodex ? "codex" : state.defaults.provider;
+function sessionIdFromUrl() {
+  const match = window.location.pathname.match(/^\/books\/([a-f0-9]{8,32})/);
+  return match ? match[1] : null;
 }
 
-function clampPages(value) {
-  const n = Math.round(Number(value));
-  if (!Number.isFinite(n)) return 12;
-  return Math.max(1, Math.min(200, n));
-}
+/* ==================== STEPPER & GSAP TRANSITIONS ==================== */
+function setStep(step, { animate = true, persist = true } = {}) {
+  const next = Math.max(1, Math.min(4, Number(step) || 1));
+  state.currentStep = next;
 
-function effectiveSettings() {
-  const d = state.defaults || {};
-  const s = state.settings || {};
-  return {
-    title: s.title || d.title || "",
-    pages: clampPages(s.pages || d.pages || 12),
-    context_prompt: s.context_prompt || d.context_prompt || "",
-    provider: s.provider || d.provider || "",
-    model: s.model || d.model || "",
-    caption_enabled: Boolean(s.caption_enabled ?? d.caption_enabled ?? false),
-    caption_style: s.caption_style || d.caption_style || "balloon",
-    caption_position: s.caption_position || d.caption_position || "bottom",
-    caption_font_family: s.caption_font_family || d.caption_font_family || "sans",
-    caption_font_bold: Boolean(s.caption_font_bold ?? d.caption_font_bold ?? false),
-    caption_font_size: String(
-      s.caption_font_size ?? d.caption_font_size ?? 0.032
-    ),
-  };
-}
-
-async function loadCharacters() {
-  try {
-    state.characters = await api("/api/characters");
-  } catch (_) {
-    state.characters = [];
-  }
-}
-
-async function loadSettings() {
-  try {
-    state.settings = await api("/api/settings");
-  } catch (_) {
-    state.settings = null;
-  }
-}
-
-async function createSession(pages, title) {
-  const provider = preferredProvider();
-  const model =
-    provider === "codex"
-      ? state.codexModels[0] || state.defaults.codex_model
-      : $("#model").value || state.defaults.model;
-  const body = {
-    pages,
-    title: title || undefined,
-    context_prompt: $("#context").value || state.defaults.context_prompt,
-    provider,
-    model,
-    caption_enabled: $("#caption-enabled").checked,
-    caption_style: $("#caption-style").value,
-    caption_position: $("#caption-position").value,
-    caption_font_family: $("#caption-font").value,
-    caption_font_bold: $("#caption-weight").value === "bold",
-    caption_font_size: Number($("#caption-size").value) || 0.032,
-  };
-  const session = await api("/api/sessions", {
-    method: "POST",
-    body: JSON.stringify(body),
+  $$(".step-tab").forEach((tab) => {
+    tab.classList.toggle("is-active", Number(tab.dataset.step) === next);
   });
-  window.location.href = `/books/${session.id}`;
-  return session;
-}
 
-async function refreshSession() {
-  state.session = await api(`/api/sessions/${state.session.id}`);
-}
+  for (let i = 1; i <= 4; i++) {
+    const panel = $(`#stage-${i}`);
+    const isTarget = i === next;
+    panel.classList.toggle("is-hidden", !isTarget);
+    if (isTarget && animate && typeof window.gsap !== "undefined") {
+      const mm = window.gsap.matchMedia();
+      mm.add("(prefers-reduced-motion: no-preference)", () => {
+        window.gsap.fromTo(
+          panel,
+          { y: 14, autoAlpha: 0 },
+          {
+            y: 0,
+            autoAlpha: 1,
+            duration: 0.42,
+            ease: "power3.out",
+            overwrite: "auto",
+            clearProps: "transform,opacity,visibility",
+          }
+        );
+      });
+    }
+  }
 
-async function saveSettings(skipSession = false) {
-  const rawFontSize = Number($("#caption-size").value);
-  const fontSize =
-    Number.isFinite(rawFontSize) && rawFontSize >= 0.01 && rawFontSize <= 0.08
-      ? rawFontSize
-      : 0.032;
-  const payload = {
-    title: $("#session-title").value.trim() || state.defaults.title,
-    pages: clampPages($("#pages-count").value),
-    context_prompt: $("#context").value,
-    provider: $("#provider").value || state.defaults.provider,
-    model: $("#model").value || state.defaults.model,
-    caption_enabled: $("#caption-enabled").checked,
-    caption_style: $("#caption-style").value || "balloon",
-    caption_position: $("#caption-position").value || "bottom",
-    caption_font_family: $("#caption-font").value || "sans",
-    caption_font_bold: $("#caption-weight").value === "bold",
-    caption_font_size: fontSize,
-  };
-  state.settings = await api("/api/settings", {
-    method: "PUT",
-    body: JSON.stringify(payload),
-  });
-  if (!skipSession && state.session) {
-    const patch = {
-      context_prompt: payload.context_prompt,
-      provider: payload.provider,
-      pages: payload.pages,
-      caption_enabled: payload.caption_enabled,
-      caption_style: payload.caption_style,
-      caption_position: payload.caption_position,
-      caption_font_family: payload.caption_font_family,
-      caption_font_bold: payload.caption_font_bold,
-      caption_font_size: payload.caption_font_size,
-    };
-    if (payload.title) patch.title = payload.title;
-    if (payload.model) patch.model = payload.model;
-    state.session = await api(`/api/sessions/${state.session.id}`, {
+  if (persist && state.sid) {
+    api(`/api/sessions/${state.sid}`, {
       method: "PATCH",
-      body: JSON.stringify(patch),
-    });
-    payload.pages = state.session.pages.length;
-    $("#pages-count").value = payload.pages;
-  } else {
-    $("#pages-count").value = payload.pages;
-  }
-  const note = $("#saved-note");
-  note.textContent = "Padrões salvos.";
-  setTimeout(() => {
-    if (note.textContent === "Padrões salvos.") note.textContent = "";
-  }, 2200);
-}
-
-function renderCharacters() {
-  const list = $("#character-list");
-  list.innerHTML = "";
-  $("#char-empty").classList.toggle("is-hidden", state.characters.length > 0);
-  for (const character of state.characters) {
-    const item = document.createElement("li");
-    item.className = "character-item";
-
-    const img = document.createElement("img");
-    img.src = character.url;
-    img.alt = character.name;
-    item.appendChild(img);
-
-    const name = document.createElement("span");
-    name.className = "name";
-    name.textContent = character.name;
-    item.appendChild(name);
-
-    const remove = document.createElement("button");
-    remove.className = "remove";
-    remove.type = "button";
-    remove.dataset.characterRemove = character.id;
-    remove.setAttribute("aria-label", `Remover ${character.name}`);
-    remove.textContent = "×";
-    item.appendChild(remove);
-
-    list.appendChild(item);
+      body: JSON.stringify({ current_step: next }),
+    }).catch(() => {});
   }
 }
 
-function setSelectValue(select, value) {
-  const text = String(value);
-  const exists = Array.from(select.options).some((opt) => opt.value === text);
-  if (!exists) {
-    const option = document.createElement("option");
-    option.value = text;
-    option.textContent = text;
-    select.appendChild(option);
-  }
-  select.value = text;
-}
+/* ==================== RENDERING ==================== */
+function renderHeaderAndStepper() {
+  const s = state.session;
+  if (!s) return;
 
-function updateCaptionFields() {
-  const enabled = $("#caption-enabled").checked;
-  $("#caption-options").classList.toggle("is-disabled", !enabled);
-  for (const select of $("#caption-options").querySelectorAll("select")) {
-    select.disabled = !enabled;
-  }
-  $("#page-list").classList.toggle("captions-off", !enabled);
-}
+  $("#session-title").value = s.title;
+  document.title = `${s.title} — Color Book Studio`;
+  $("#meta-format").textContent = `${s.trim_in[0]}x${s.trim_in[1]} in · ${s.dpi} DPI`;
+  if ($("#export-book-zip")) $("#export-book-zip").href = `/api/sessions/${s.id}/export`;
 
-async function loadSessions() {
-  try {
-    state.sessions = await api("/api/sessions");
-  } catch (_) {
-    state.sessions = [];
-  }
-  renderSessionOptions();
-}
+  const doneCount = s.pages.filter((p) => p.status === "done").length;
+  const totalCount = s.pages.length;
 
-function renderSessionOptions() {
-  const select = $("#session-select");
-  select.innerHTML = "";
-  const current = state.session ? state.session.id : null;
-  for (const summary of state.sessions) {
-    const option = document.createElement("option");
-    option.value = summary.id;
-    option.textContent = `${summary.title} · ${summary.done}/${summary.pages}`;
-    select.appendChild(option);
-  }
-  if (current && !state.sessions.some((item) => item.id === current)) {
-    const option = document.createElement("option");
-    option.value = current;
-    option.textContent = state.session ? state.session.title : current;
-    select.appendChild(option);
-  }
-  if (current) select.value = current;
-}
+  const activePreset = state.presets.find((p) => p.id === s.preset_id);
+  $("#step-1-sub").textContent = activePreset ? activePreset.name : s.page_size.replace("_", " ");
+  $("#step-2-sub").textContent = `${s.characters.length} ${s.characters.length === 1 ? "personagem" : "personagens"}`;
+  $("#step-3-sub").textContent = s.story_synopsis ? "Roteiro pronto" : `${totalCount} páginas`;
+  $("#step-4-sub").textContent = `${doneCount} / ${totalCount} prontas`;
+  $("#progress-pill").textContent = `${doneCount} / ${totalCount} prontas`;
 
-async function loadStyle() {
-  try {
-    const data = await api("/api/style");
-    state.styleUrl = data.url || null;
-  } catch (_) {
-    state.styleUrl = null;
-  }
-  renderStyle();
-}
+  const canCompose = doneCount > 0;
+  $("#compose-btn").disabled = !canCompose;
+  $("#compose-btn-stage").disabled = !canCompose;
 
-function renderStyle() {
-  const preview = $("#style-preview");
-  preview.innerHTML = "";
-  if (state.styleUrl) {
-    const img = document.createElement("img");
-    img.src = state.styleUrl;
-    img.alt = "Referência de estilo";
-    preview.appendChild(img);
-    $("#style-remove").classList.remove("is-hidden");
-  } else {
-    const empty = document.createElement("span");
-    empty.textContent = "Nenhum estilo definido.";
-    preview.appendChild(empty);
-    $("#style-remove").classList.add("is-hidden");
+  for (const linkSel of ["#pdf-link", "#pdf-link-stage"]) {
+    const el = $(linkSel);
+    el.classList.toggle("is-hidden", !s.pdf_ready || !s.pdf_url);
+    if (s.pdf_url) el.href = s.pdf_url;
   }
 }
 
-async function uploadStyle() {
-  const fileInput = $("#style-file");
-  const errorBox = $("#style-error");
-  errorBox.classList.add("is-hidden");
-  const file = fileInput.files && fileInput.files[0];
-  if (!file) {
-    errorBox.textContent = "Selecione uma imagem.";
-    errorBox.classList.remove("is-hidden");
-    return;
-  }
-  const form = new FormData();
-  form.append("image", file);
-  const button = $("#style-upload");
-  button.disabled = true;
-  button.textContent = "Enviando…";
-  try {
-    await api("/api/style", { method: "POST", body: form });
-    fileInput.value = "";
-    await loadStyle();
-    toast("Estilo de referência definido.");
-  } catch (err) {
-    errorBox.textContent = err.message || "Falha ao enviar o estilo.";
-    errorBox.classList.remove("is-hidden");
-  } finally {
-    button.disabled = false;
-    button.textContent = "Definir estilo";
-  }
+function renderPresets() {
+  renderStylePicker({
+    root: $("#studio-style-picker"),
+    presets: state.presets,
+    categories: state.categories,
+    selectedId: state.session?.preset_id,
+    onSelect: async (preset) => {
+      try {
+        await api(`/api/sessions/${state.sid}/apply-preset`, {
+          method: "POST",
+          body: JSON.stringify({ preset_id: preset.id }),
+        });
+        await reloadSession();
+        toast(`Estilo "${preset.name}" aplicado ao livro.`);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    },
+  });
 }
 
-async function removeStyle() {
-  try {
-    await api("/api/style", { method: "DELETE" });
-    state.styleUrl = null;
-    renderStyle();
-    toast("Estilo removido.");
-  } catch (err) {
-    toast(err.message || "Falha ao remover o estilo", true);
-  }
-}
+function renderStage1Form() {
+  const s = state.session;
+  if (!s) return;
 
-async function usePageAsStyle(index) {
-  if (!state.session) return;
-  try {
-    const data = await api(
-      `/api/sessions/${state.session.id}/pages/${index}/use-as-style`,
-      { method: "POST" }
-    );
-    state.styleUrl = data.url || null;
-    renderStyle();
-    toast("Página definida como referência de estilo.");
-  } catch (err) {
-    toast(err.message || "Falha ao definir o estilo", true);
-  }
-}
+  $("#context").value = s.context_prompt || "";
+  $("#negative-prompt").value = s.negative_prompt || "";
+  $("#page-size").value = s.page_size || "letter_8.5x11";
 
-function fillProviderOptions() {
-  const select = $("#provider");
-  if (select.options.length || !state.defaults) return;
-  for (const name of state.defaults.providers) {
+  const provSelect = $("#provider");
+  const providers = state.defaults?.providers || ["codex", "openai", "gemini", "replicate", "local"];
+  provSelect.innerHTML = "";
+  for (const p of providers) {
     const opt = document.createElement("option");
-    opt.value = name;
-    opt.textContent = name;
+    opt.value = p;
+    opt.textContent = p;
+    provSelect.appendChild(opt);
+  }
+  provSelect.value = s.provider;
+  renderModelSuggestions({ preferred: s.model });
+
+  const proc = s.processing || {};
+  $("#proc-threshold").value = proc.threshold || "adaptive";
+  $("#proc-min-px").value = proc.min_component_px ?? 24;
+  $("#proc-denoise").checked = proc.denoise ?? true;
+  $("#proc-crop").checked = proc.crop_to_content ?? true;
+  syncAllPopoverSelects();
+
+  // Style anchor preview
+  const preview = $("#style-preview");
+  const removeBtn = $("#style-remove");
+  preview.innerHTML = "";
+  if (s.style_url) {
+    const img = document.createElement("img");
+    img.src = s.style_url;
+    img.alt = "Âncora de estilo do livro";
+    img.addEventListener("click", () => {
+      openLightbox([{ url: s.style_url, caption: "Âncora visual de estilo do livro" }], 0);
+    });
+    preview.appendChild(img);
+    removeBtn.classList.toggle("is-hidden", Boolean(s.style_inherited_global));
+  } else {
+    const span = document.createElement("span");
+    span.textContent = "Nenhuma imagem âncora definida ainda. Gere uma com IA ou envie uma imagem de referência.";
+    preview.appendChild(span);
+    removeBtn.classList.add("is-hidden");
+  }
+}
+
+function costRank(slug) {
+  const low = String(slug || "").toLowerCase();
+  if (low.includes("nano") || low.includes("spark") || low.includes("lite") || low.includes("flash") || low.includes("schnell")) return 0;
+  if (low.includes("mini") || low.includes("fast")) return 1;
+  if (low.includes("luna") || low.includes("small")) return 2;
+  if (low.includes("terra")) return 3;
+  return 4;
+}
+
+function renderModelSuggestions({ preferred = null, forceCheapest = false } = {}) {
+  const select = $("#model");
+  const provider = $("#provider").value;
+  let models = [];
+  let cheapest = null;
+
+  if (provider === "codex") {
+    const raw = state.codexModels.length
+      ? [...state.codexModels]
+      : [state.defaults?.codex_model || "gpt-5.4-mini", "gpt-5.5", "gpt-6.2-sol"];
+    models = [...raw].sort((a, b) => costRank(a) - costRank(b));
+    cheapest = state.codexCheapest || models[0];
+    if (cheapest && models.includes(cheapest)) {
+      models = [cheapest, ...models.filter((m) => m !== cheapest)];
+    }
+  } else if (provider === "openai") {
+    models = ["gpt-image-1", "dall-e-3"];
+    cheapest = "gpt-image-1";
+  } else if (provider === "gemini") {
+    models = ["imagen-3.0-fast-generate-001", "imagen-3.0-generate-002"];
+    cheapest = "imagen-3.0-fast-generate-001";
+  } else if (provider === "replicate") {
+    models = ["black-forest-labs/flux-schnell", "black-forest-labs/flux-dev"];
+    cheapest = "black-forest-labs/flux-schnell";
+  } else if (provider === "local") {
+    models = ["stabilityai/stable-diffusion-xl-base-1.0"];
+    cheapest = models[0];
+  }
+
+  const current = forceCheapest ? cheapest : preferred || select.value || cheapest;
+  if (current && !models.includes(current)) {
+    models.push(current);
+  }
+
+  select.innerHTML = "";
+  for (const m of models) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    opt.textContent = m;
+    if (m === cheapest) opt.dataset.badge = "Mais barato";
+    select.appendChild(opt);
+  }
+  select.value = current || models[0] || "";
+  syncAllPopoverSelects();
+}
+
+function renderStage2Characters() {
+  const s = state.session;
+  if (!s) return;
+
+  const grid = $("#book-char-grid");
+  const empty = $("#book-char-empty");
+  grid.innerHTML = "";
+  empty.classList.toggle("is-hidden", s.characters.length > 0);
+
+  for (const char of s.characters) {
+    const card = document.createElement("div");
+    card.className = "char-card";
+    const statusClass =
+      char.sheet_status === "ready"
+        ? "pill-ok"
+        : char.sheet_status === "error"
+        ? "pill-err"
+        : char.sheet_status === "generating"
+        ? "pill-warn"
+        : "";
+
+    card.innerHTML = `
+      <div class="char-sheet-thumb"></div>
+      <div class="char-card-body">
+        <div class="char-card-head">
+          <span class="char-card-name"></span>
+          <span class="pill ${statusClass}"></span>
+        </div>
+        <p class="char-card-desc"></p>
+        ${char.error ? `<p class="error-msg" style="margin: 0;"></p>` : ""}
+        <label class="check-toggle" style="font-size: 0.82rem;">
+          <input type="checkbox" class="char-approve-toggle" ${char.approved ? "checked" : ""} />
+          <span>Aprovado para usar nas páginas</span>
+        </label>
+        <div class="char-card-actions">
+          <button class="btn btn-accent btn-sm char-gen-btn" type="button">
+            ${char.image_url ? "Regenerar Sheet" : "Gerar Character Sheet"}
+          </button>
+          <button class="btn btn-danger-ghost btn-sm char-del-btn" type="button">Remover</button>
+        </div>
+      </div>
+    `;
+    const thumb = card.querySelector(".char-sheet-thumb");
+    if (char.image_url) {
+      const img = document.createElement("img");
+      img.src = char.image_url;
+      img.alt = "";
+      img.addEventListener("click", () => {
+        openLightbox([{ url: char.image_url, caption: `Character Sheet — ${char.name}` }], 0);
+      });
+      thumb.appendChild(img);
+    } else {
+      const emptyHint = document.createElement("span");
+      emptyHint.className = "hint";
+      emptyHint.style.cssText = "font-size: 0.82rem; padding: 12px; text-align: center;";
+      emptyHint.textContent = "Character Sheet ainda não gerado";
+      thumb.appendChild(emptyHint);
+    }
+    card.querySelector(".char-card-name").textContent = char.name;
+    card.querySelector(".char-card-head .pill").textContent = SHEET_STATUS_LABEL[char.sheet_status] || char.sheet_status;
+    card.querySelector(".char-card-desc").textContent = char.description || "Sem descrição visual cadastrada.";
+    if (char.error) card.querySelector(".error-msg").textContent = char.error;
+
+    card.querySelector(".char-approve-toggle").addEventListener("change", async (ev) => {
+      try {
+        await api(`/api/sessions/${state.sid}/characters/${char.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ approved: ev.target.checked }),
+        });
+        await reloadSession();
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+
+    card.querySelector(".char-gen-btn").addEventListener("click", async (ev) => {
+      const btn = ev.currentTarget;
+      btn.disabled = true;
+      btn.textContent = "Gerando Sheet…";
+      try {
+        await api(`/api/sessions/${state.sid}/characters/${char.id}/generate-sheet`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+        await reloadSession();
+        toast(`Character Sheet de ${char.name} atualizado!`);
+      } catch (err) {
+        toast(err.message, true);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    card.querySelector(".char-del-btn").addEventListener("click", async () => {
+      try {
+        await api(`/api/sessions/${state.sid}/characters/${char.id}`, { method: "DELETE" });
+        await reloadSession();
+        toast(`Personagem ${char.name} removido.`);
+      } catch (err) {
+        toast(err.message, true);
+      }
+    });
+
+    grid.appendChild(card);
+  }
+
+  // Global character library selector
+  const select = $("#global-char-select");
+  const bookIds = new Set(s.characters.map((c) => c.id));
+  const available = state.globalCharacters.filter((c) => !bookIds.has(c.id));
+  $("#global-import-wrap").classList.toggle("is-hidden", available.length === 0);
+  select.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Importar da biblioteca global…";
+  select.appendChild(placeholder);
+  for (const c of available) {
+    const opt = document.createElement("option");
+    opt.value = c.id;
+    opt.textContent = c.name;
     select.appendChild(opt);
   }
 }
 
-function pageCard(page) {
-  const card = document.createElement("li");
-  card.className = "page-card";
-  card.dataset.index = String(page.index);
-  card.dataset.status = page.status;
+function renderStage3Story() {
+  const s = state.session;
+  if (!s) return;
 
-  const thumb = document.createElement("div");
-  thumb.className = "thumb";
-  if (page.status === "generating") {
-    thumb.classList.add("is-loading");
-    thumb.innerHTML = `<div class="thumb-placeholder"><div class="spinner"></div><span>gerando</span></div>`;
-  } else if (page.preview_url) {
-    const img = document.createElement("img");
-    img.src = page.preview_url;
-    img.alt = `Página ${page.index}`;
-    img.loading = "lazy";
-    thumb.appendChild(img);
-    thumb.classList.add("is-clickable");
-    thumb.dataset.action = "lightbox";
-    thumb.tabIndex = 0;
-    thumb.setAttribute("role", "button");
-    thumb.setAttribute("aria-label", `Ampliar página ${page.index}`);
-  } else {
-    thumb.innerHTML = `
-      <div class="thumb-placeholder">
-        <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.3">
-          <rect x="3.5" y="3.5" width="17" height="17" rx="2.5" />
-          <path d="M3.5 15.5l4.8-4.8 4 4 2.4-2.4 5.8 5.8" />
-          <circle cx="9" cy="8.6" r="1.6" />
-        </svg>
-        <span>sem imagem</span>
-      </div>`;
+  $$("[data-story-mode]").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.storyMode === s.story_mode);
+  });
+  $("#story-premise").value = s.story_premise || "";
+  $("#story-synopsis").value = s.story_synopsis || "";
+  $("#story-pages").value = s.pages.length || 12;
+  if ($("#story-language")) $("#story-language").value = s.language || "en";
+
+  $("#caption-enabled").checked = Boolean(s.caption_enabled);
+  $("#caption-style").value = s.caption_style || "balloon";
+  $("#caption-position").value = s.caption_position || "bottom";
+  $("#caption-font").value = s.caption_font_family || "sans";
+  $("#caption-weight").value = s.caption_font_bold ? "bold" : "normal";
+  $("#caption-size").value = String(s.caption_font_size || 0.032);
+  $("#caption-options").style.opacity = s.caption_enabled ? "1" : "0.5";
+
+  const list = $("#script-list");
+  list.innerHTML = "";
+  const allChars = allSelectableCharacters();
+
+  for (const page of s.pages) {
+    const li = document.createElement("li");
+    li.className = "script-card";
+    li.innerHTML = `
+      <span class="page-index-badge">${page.index}</span>
+      <div class="page-card-body">
+        <div class="field-row">
+          <label class="field-label">
+            <span>Título da cena</span>
+            <input class="field script-title" type="text" placeholder="Página ${page.index}" />
+          </label>
+          <label class="field-label">
+            <span>Texto / legenda da página</span>
+            <input class="field script-caption" type="text" placeholder="Fala ou legenda que aparece no livro" />
+          </label>
+        </div>
+        <label class="field-label">
+          <span>Prompt visual da cena</span>
+          <textarea class="field script-prompt" rows="2"></textarea>
+        </label>
+        <div class="chip-row script-chips"></div>
+      </div>
+    `;
+    const titleEl = li.querySelector(".script-title");
+    const capEl = li.querySelector(".script-caption");
+    const promptEl = li.querySelector(".script-prompt");
+    titleEl.value = page.title || "";
+    capEl.value = page.caption_text || "";
+    promptEl.value = page.prompt || "";
+
+    const savePage = debounce(async () => {
+      try {
+        await api(`/api/sessions/${state.sid}/pages/${page.index}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            title: titleEl.value,
+            caption_text: capEl.value,
+            prompt: promptEl.value,
+          }),
+        });
+        page.title = titleEl.value;
+        page.caption_text = capEl.value;
+        page.prompt = promptEl.value;
+      } catch (err) {
+        toast(err.message, true);
+      }
+    }, 450);
+
+    titleEl.addEventListener("input", savePage);
+    capEl.addEventListener("input", savePage);
+    promptEl.addEventListener("input", savePage);
+
+    renderCharacterChips(li.querySelector(".script-chips"), page, allChars);
+    list.appendChild(li);
   }
-  card.appendChild(thumb);
-
-  const body = document.createElement("div");
-  body.className = "card-body";
-
-  const head = document.createElement("div");
-  head.className = "card-head";
-  head.innerHTML = `
-    <span class="page-num">${String(page.index).padStart(2, "0")}</span>
-    <span class="status" data-kind="${page.status}">${STATUS_LABEL[page.status] || page.status}</span>
-    <span class="spacer"></span>
-    <span class="dims">${page.width_px ? `${page.width_px}×${page.height_px}px` : ""}</span>`;
-  body.appendChild(head);
-
-  const textarea = document.createElement("textarea");
-  textarea.className = "page-textarea";
-  textarea.rows = 2;
-  textarea.spellcheck = false;
-  textarea.value = page.prompt;
-  textarea.setAttribute("aria-label", `Prompt da página ${page.index}`);
-  body.appendChild(textarea);
-
-  const captionInput = document.createElement("input");
-  captionInput.type = "text";
-  captionInput.className = "page-caption";
-  captionInput.placeholder = "Texto da legenda / balão (opcional)";
-  captionInput.value = page.caption_text || "";
-  captionInput.setAttribute("aria-label", `Legenda da página ${page.index}`);
-  body.appendChild(captionInput);
-
-  if (state.characters.length) {
-    const chips = document.createElement("div");
-    chips.className = "char-chips";
-    const selected = new Set(page.character_ids || []);
-    for (const character of state.characters) {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "char-chip";
-      chip.dataset.character = character.id;
-      chip.setAttribute("aria-pressed", selected.has(character.id) ? "true" : "false");
-      if (selected.has(character.id)) chip.classList.add("active");
-      const thumb = document.createElement("img");
-      thumb.src = character.url;
-      thumb.alt = "";
-      chip.appendChild(thumb);
-      const label = document.createElement("span");
-      label.textContent = character.name;
-      chip.appendChild(label);
-      chips.appendChild(chip);
-    }
-    body.appendChild(chips);
-  }
-
-  if (page.error) {
-    const err = document.createElement("p");
-    err.className = "error-msg";
-    err.textContent = page.error;
-    body.appendChild(err);
-  }
-
-  const actions = document.createElement("div");
-  actions.className = "card-actions";
-
-  const generateBtn = document.createElement("button");
-  generateBtn.className = "btn btn-primary btn-small";
-  generateBtn.dataset.action = "generate";
-  generateBtn.disabled = page.status === "generating" || state.busy.has(page.index);
-  if (page.status === "generating") {
-    generateBtn.innerHTML = `<span class="spinner"></span> Gerando`;
-  } else {
-    generateBtn.textContent = page.status === "done" ? "Regenerar" : "Gerar imagem";
-  }
-  actions.appendChild(generateBtn);
-
-  if (page.image_url) {
-    const link = document.createElement("a");
-    link.className = "btn btn-outline btn-small";
-    link.href = page.image_url;
-    link.textContent = "Baixar PNG";
-    actions.appendChild(link);
-
-    const styleBtn = document.createElement("button");
-    styleBtn.className = "btn btn-ghost btn-small";
-    styleBtn.dataset.action = "use-style";
-    styleBtn.type = "button";
-    styleBtn.textContent = "Usar como estilo";
-    actions.appendChild(styleBtn);
-  }
-
-  const hint = document.createElement("span");
-  hint.className = "hint-inline";
-  hint.textContent = page.status === "done" ? "300 dpi" : "";
-  actions.appendChild(hint);
-
-  body.appendChild(actions);
-  card.appendChild(body);
-  return card;
 }
 
-function render() {
-  const session = state.session;
-  const defaults = state.defaults;
-  const eff = effectiveSettings();
-
-  const trim = defaults.trim_in;
-  $("#meta").innerHTML = `
-    <span>${escapeHtml(session ? session.title : eff.title)}</span>
-    <span>${trim[0]}×${trim[1]} in</span>
-    <span>${defaults.dpi} dpi</span>`;
-
-  if (document.activeElement !== $("#context")) {
-    $("#context").value = session ? session.context_prompt : eff.context_prompt;
+function allSelectableCharacters() {
+  const s = state.session;
+  if (!s) return [];
+  const map = new Map();
+  for (const c of s.characters) {
+    map.set(c.id, { id: c.id, name: c.name });
   }
-  if (document.activeElement !== $("#provider")) {
-    fillProviderOptions();
-    $("#provider").value = session ? session.provider : eff.provider;
+  for (const c of state.globalCharacters) {
+    if (!map.has(c.id)) map.set(c.id, { id: c.id, name: `${c.name} (global)` });
   }
-  if (document.activeElement !== $("#model")) {
-    const codexModels = state.codexModels;
-    const list = $("#model-options");
-    list.innerHTML = "";
-    for (const slug of codexModels) {
-      const opt = document.createElement("option");
-      opt.value = slug;
-      list.appendChild(opt);
-    }
+  return Array.from(map.values());
+}
 
-    let modelValue = session ? session.model : eff.model;
-    if (session && session.provider === "codex") {
-      if (codexModels.length && !codexModels.includes(modelValue)) {
-        modelValue = codexModels[0];
-      } else if (OPENAI_IMAGE_MODELS.has(modelValue)) {
-        modelValue = defaults.codex_model;
+function renderCharacterChips(container, page, chars) {
+  container.innerHTML = "";
+  if (!chars.length) return;
+  for (const c of chars) {
+    const active = page.character_ids.includes(c.id);
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chip" + (active ? " is-active" : "");
+    btn.textContent = c.name;
+    btn.addEventListener("click", async () => {
+      const nextIds = active
+        ? page.character_ids.filter((id) => id !== c.id)
+        : [...page.character_ids, c.id];
+      page.character_ids = nextIds;
+      try {
+        await api(`/api/sessions/${state.sid}/pages/${page.index}`, {
+          method: "PATCH",
+          body: JSON.stringify({ character_ids: nextIds }),
+        });
+        renderStage3Story();
+        renderStage4Pages();
+      } catch (err) {
+        toast(err.message, true);
       }
-    }
-    $("#model").value = modelValue;
+    });
+    container.appendChild(btn);
   }
-  if (document.activeElement !== $("#session-title")) {
-    $("#session-title").value = session ? session.title : eff.title;
-  }
-  if (document.activeElement !== $("#pages-count")) {
-    $("#pages-count").value = session ? session.pages.length : eff.pages;
-  }
-  const capEnabled = session ? session.caption_enabled : eff.caption_enabled;
-  const capStyle = session ? session.caption_style : eff.caption_style;
-  const capPosition = session ? session.caption_position : eff.caption_position;
-  const capFont = session ? session.caption_font_family : eff.caption_font_family;
-  const capBold = session ? session.caption_font_bold : eff.caption_font_bold;
-  const capSize = session ? session.caption_font_size : eff.caption_font_size;
-  $("#caption-enabled").checked = Boolean(capEnabled);
-  $("#caption-style").value = capStyle;
-  $("#caption-position").value = capPosition;
-  setSelectValue($("#caption-font"), capFont || "sans");
-  setSelectValue($("#caption-weight"), capBold ? "bold" : "normal");
-  setSelectValue($("#caption-size"), capSize || 0.032);
-  updateCaptionFields();
+}
+
+function renderStage4Pages() {
+  const s = state.session;
+  if (!s) return;
+
+  $("#kdp-blank-verso").checked = Boolean(s.blank_verso);
+  $("#kdp-title-page").checked = Boolean(s.include_title_page);
+  $("#kdp-belongs-to").checked = Boolean(s.include_belongs_to_page);
+  $("#kdp-color-test").checked = Boolean(s.include_color_test_page);
 
   const list = $("#page-list");
   list.innerHTML = "";
-  const pages = session ? session.pages : [];
-  $("#empty-state").classList.toggle("is-hidden", pages.length > 0);
+  const allChars = allSelectableCharacters();
+  const donePages = s.pages.filter((p) => p.status === "done" && p.view_url);
 
-  for (const page of pages) list.appendChild(pageCard(page));
-
-  const done = pages.filter((p) => p.status === "done").length;
-  $("#progress-pill").textContent = `${done} / ${pages.length}`;
-  $("#pages-subtitle").textContent = pages.length
-    ? `${pages.length} páginas · ${pages.filter((p) => p.status === "pending").length} pendentes`
-    : "Nenhuma página";
-
-  const composeBtn = $("#compose-btn");
-  composeBtn.disabled = done === 0 || state.busy.size > 0;
-  if (session && session.pdf_url) {
-    composeBtn.textContent = "Recompor PDF";
-    const link = $("#pdf-link");
-    link.href = session.pdf_url;
-    link.classList.remove("is-hidden");
-  } else {
-    composeBtn.textContent = "Gerar PDF";
-    $("#pdf-link").classList.add("is-hidden");
-  }
-
-  const pending = pages.some((p) => p.status !== "done");
-  $("#generate-pending").disabled = !pending || state.busy.size > 0;
-}
-
-const OPENAI_IMAGE_MODELS = new Set(["gpt-image-1", "gpt-image-2", "dall-e-3"]);
-
-function applyProviderDefaults(providerName) {
-  const d = state.defaults;
-  if (!d) return;
-  const modelInput = $("#model");
-  const codexModels = state.codexModels;
-  if (providerName === "codex") {
-    if (
-      !modelInput.value ||
-      OPENAI_IMAGE_MODELS.has(modelInput.value) ||
-      (codexModels.length && !codexModels.includes(modelInput.value))
-    ) {
-      modelInput.value = codexModels[0] || d.codex_model;
-    }
-  } else if (providerName === "openai") {
-    if (!modelInput.value || modelInput.value === d.codex_model) {
-      modelInput.value = "gpt-image-1";
-    }
-  }
-}
-
-async function useCodexProvider() {
-  if (!state.session || state.session.provider === "codex") return;
-  const codexModels = state.codexModels;
-  const codexModel = codexModels[0] || state.defaults.codex_model;
-  state.session = await api(`/api/sessions/${state.session.id}`, {
-    method: "PATCH",
-    body: JSON.stringify({
-      provider: "codex",
-      model: codexModel,
-    }),
-  });
-  $("#model").value = codexModel;
-  render();
-  toast("Provedor alterado para codex (seu plano ChatGPT).");
-}
-
-function renderCodex() {
-  const info = state.codex;
-  const pill = $("#codex-status");
-  const codeBox = $("#codex-code");
-  const errorBox = $("#codex-error");
-  const connectBtn = $("#codex-connect");
-  const logoutBtn = $("#codex-logout");
-
-  let kind = "pending";
-  let label = "desconectado";
-  if (info && info.authenticated) {
-    kind = "done";
-    label = "conectado";
-  } else if (info && info.pending) {
-    kind = "generating";
-    label = "aguardando";
-  }
-  pill.dataset.kind = kind;
-  pill.textContent = label;
-
-  const showCode = Boolean(info && info.pending && info.user_code);
-  codeBox.classList.toggle("is-hidden", !showCode);
-  if (showCode) {
-    $("#codex-user-code").textContent = info.user_code;
-    $("#codex-link").href = info.verification_url || "https://auth.openai.com/codex/device";
-  }
-
-  const error = info && info.error;
-  errorBox.classList.toggle("is-hidden", !error);
-  errorBox.textContent = error || "";
-
-  const connected = Boolean(info && info.authenticated);
-  connectBtn.classList.toggle("is-hidden", connected);
-  connectBtn.disabled = Boolean(info && info.pending);
-  connectBtn.textContent = info && info.pending ? "Aguardando autorização…" : "Conectar ChatGPT";
-  logoutBtn.classList.toggle("is-hidden", !connected || Boolean(info && info.pending));
-}
-
-async function loadCodexModels() {
-  if (!state.codex || !state.codex.authenticated) {
-    state.codexModels = [];
-    return;
-  }
-  try {
-    const data = await api("/api/auth/codex/models");
-    state.codexModels = data.models || [];
-  } catch (_) {
-    state.codexModels = [];
-  }
-}
-
-async function refreshCodex() {
-  try {
-    state.codex = await api("/api/auth/codex");
-  } catch (_) {}
-  await loadCodexModels();
-  renderCodex();
-}
-
-function pollCodex() {
-  clearInterval(state.codexTimer);
-  state.codexTimer = setInterval(async () => {
-    try {
-      state.codex = await api("/api/auth/codex");
-    } catch (_) {
-      return;
-    }
-    renderCodex();
-    if (!state.codex.pending) {
-      clearInterval(state.codexTimer);
-      if (state.codex.authenticated) {
-        toast("ChatGPT conectado.");
-        try {
-          state.defaults = await api("/api/defaults");
-          await loadCodexModels();
-          if (!state.defaults.openai_configured) {
-            await useCodexProvider();
-          }
-        } catch (_) {}
-        render();
-      } else if (state.codex.error) {
-        toast(state.codex.error, true);
-      }
-    }
-  }, 2500);
-}
-
-async function connectCodex() {
-  try {
-    state.codex = await api("/api/auth/codex/start", { method: "POST" });
-    renderCodex();
-    if (state.codex.pending) pollCodex();
-  } catch (err) {
-    toast(err.message || "Falha ao iniciar login", true);
-  }
-}
-
-async function logoutCodex() {
-  try {
-    state.codex = await api("/api/auth/codex/logout", { method: "POST" });
-    state.codexModels = [];
-    renderCodex();
-    toast("ChatGPT desconectado.");
-  } catch (err) {
-    toast(err.message || "Falha ao desconectar", true);
-  }
-}
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  })[c]);
-}
-
-function setBusy(index, busy) {
-  if (busy) state.busy.add(index);
-  else state.busy.delete(index);
-}
-
-async function generatePage(index) {
-  const session = state.session;
-  if (!session || state.busy.has(index)) return;
-  const card = document.querySelector(`.page-card[data-index="${index}"]`);
-  const textarea = card ? card.querySelector(".page-textarea") : null;
-  const captionInput = card ? card.querySelector(".page-caption") : null;
-  const prompt = textarea ? textarea.value : undefined;
-  const captionText = captionInput ? captionInput.value : undefined;
-  const characterIds = card
-    ? Array.from(card.querySelectorAll(".char-chip.active")).map(
-        (chip) => chip.dataset.character
-      )
-    : [];
-
-  setBusy(index, true);
-  render();
-
-  try {
-    const page = await api(
-      `/api/sessions/${session.id}/pages/${index}/generate`,
-      {
-        method: "POST",
-        body: JSON.stringify({
-          prompt,
-          caption_text: captionText,
-          character_ids: characterIds,
-          context_prompt: $("#context").value,
-          provider: $("#provider").value || undefined,
-          model: $("#model").value || undefined,
-        }),
-      }
-    );
-    const idx = session.pages.findIndex((p) => p.index === index);
-    if (idx >= 0) session.pages[idx] = page;
-    session.pdf_ready = false;
-    if (page.status === "error") toast(page.error || "Falha ao gerar", true);
-  } catch (err) {
-    toast(err.message || "Falha ao gerar", true);
-    try {
-      await refreshSession();
-    } catch (_) {}
-  } finally {
-    setBusy(index, false);
-    render();
-    loadSessions();
-  }
-}
-
-async function addCharacter() {
-  const nameInput = $("#character-name");
-  const fileInput = $("#character-file");
-  const errorBox = $("#character-error");
-  errorBox.classList.add("is-hidden");
-  const name = nameInput.value.trim();
-  const file = fileInput.files && fileInput.files[0];
-  if (!name) {
-    errorBox.textContent = "Informe o nome do personagem.";
-    errorBox.classList.remove("is-hidden");
-    return;
-  }
-  if (!file) {
-    errorBox.textContent = "Selecione uma imagem.";
-    errorBox.classList.remove("is-hidden");
-    return;
-  }
-  const form = new FormData();
-  form.append("name", name);
-  form.append("image", file);
-  if (state.session) form.append("session_id", state.session.id);
-  const button = $("#character-add");
-  button.disabled = true;
-  button.textContent = "Enviando…";
-  try {
-    await api("/api/characters", { method: "POST", body: form });
-    nameInput.value = "";
-    fileInput.value = "";
-    await loadCharacters();
-    if (state.session) await refreshSession();
-    renderCharacters();
-    render();
-    toast("Personagem adicionado e aplicado às páginas desta sessão.");
-  } catch (err) {
-    errorBox.textContent = err.message || "Falha ao enviar personagem.";
-    errorBox.classList.remove("is-hidden");
-  } finally {
-    button.disabled = false;
-    button.textContent = "Adicionar personagem";
-  }
-}
-
-async function removeCharacter(id) {
-  if (!confirm("Remover este personagem?")) return;
-  try {
-    await api(`/api/characters/${id}`, { method: "DELETE" });
-    await loadCharacters();
-    renderCharacters();
-    if (state.session) await refreshSession();
-    render();
-    toast("Personagem removido.");
-  } catch (err) {
-    toast(err.message || "Falha ao remover personagem", true);
-  }
-}
-
-function showBusy(title, sub = "Não feche esta página.") {
-  $("#busy-title").textContent = title;
-  $("#busy-sub").textContent = sub;
-  $("#busy-fill").style.width = "0%";
-  $("#busy-bar").classList.remove("indeterminate");
-  $("#busy-overlay").classList.remove("is-hidden");
-  document.body.classList.add("lightbox-open");
-}
-
-function busyProgress(percent, title) {
-  if (title) $("#busy-title").textContent = title;
-  const clamped = Math.max(0, Math.min(100, percent));
-  $("#busy-fill").style.width = `${clamped}%`;
-  $("#busy-sub").textContent = `${Math.round(clamped)}%`;
-}
-
-function busyProcessing(title) {
-  $("#busy-title").textContent = title;
-  $("#busy-sub").textContent = "Processando… não feche esta página.";
-  $("#busy-bar").classList.add("indeterminate");
-}
-
-function hideBusy() {
-  $("#busy-overlay").classList.add("is-hidden");
-  document.body.classList.remove("lightbox-open");
-}
-
-async function importBackup() {
-  const fileInput = $("#import-file");
-  const errorBox = $("#backup-error");
-  errorBox.classList.add("is-hidden");
-  const file = fileInput.files && fileInput.files[0];
-  if (!file) {
-    errorBox.textContent = "Selecione o arquivo .zip do backup.";
-    errorBox.classList.remove("is-hidden");
-    return;
-  }
-  const form = new FormData();
-  form.append("archive", file);
-  const button = $("#import-btn");
-  button.disabled = true;
-
-  showBusy("Enviando backup…", "0%");
-  const xhr = new XMLHttpRequest();
-  xhr.open("POST", "/api/import");
-  xhr.responseType = "json";
-  xhr.timeout = 20 * 60 * 1000;
-  xhr.upload.onprogress = (event) => {
-    if (event.lengthComputable) {
-      busyProgress((event.loaded / event.total) * 100, "Enviando backup…");
-    }
-  };
-  xhr.upload.onload = () => {
-    busyProcessing("Importando sessões, imagens e personagens…");
-  };
-  xhr.onload = () => {
-    if (xhr.status >= 200 && xhr.status < 300) {
-      const result = xhr.response || {};
-      busyProgress(100, "Importação concluída");
-      const skipped = result.skipped
-        ? ` · ${result.skipped} de teste ignoradas`
+  for (const page of s.pages) {
+    const li = document.createElement("li");
+    li.className = "page-card";
+    const busy = state.busyPages.has(page.index) || page.status === "generating";
+    const statusClass =
+      page.status === "done"
+        ? "pill-ok"
+        : page.status === "error"
+        ? "pill-err"
+        : busy
+        ? "pill-warn"
         : "";
-      $("#busy-sub").textContent =
-        `${result.sessions || 0} sessões · ${result.pages || 0} páginas · ` +
-        `${result.characters || 0} personagens${skipped}`;
-      const target = result.latest_session;
-      setTimeout(() => {
-        if (target) window.location.href = `/books/${target}`;
-        else window.location.reload();
-      }, 900);
-    } else {
-      const body = xhr.response || {};
-      hideBusy();
-      button.disabled = false;
-      errorBox.textContent = body.detail || `Falha ao importar (HTTP ${xhr.status}).`;
-      errorBox.classList.remove("is-hidden");
+
+    li.innerHTML = `
+      <div class="page-thumb">
+        ${
+          page.preview_url
+            ? `<img src="${page.preview_url}" alt="Página ${page.index}" loading="lazy" />`
+            : `<span>${busy ? "Gerando…" : `Página ${page.index}`}</span>`
+        }
+      </div>
+      <div class="page-card-body">
+        <div class="page-card-head">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span class="page-index-badge">${page.index}</span>
+            <strong class="page-scene-title"></strong>
+            <span class="pill ${statusClass}">${STATUS_LABEL[busy ? "generating" : page.status] || page.status}</span>
+          </div>
+          <div class="topbar-actions">
+            <button class="btn btn-primary btn-sm page-gen-btn" type="button" ${busy ? "disabled" : ""}>
+              ${page.status === "done" ? "Regenerar" : "Gerar página"}
+            </button>
+            ${
+              page.status === "done"
+                ? `<button class="btn btn-outline btn-sm page-style-btn" type="button">Usar como estilo</button>
+                   <a class="btn btn-ghost btn-sm" href="${page.image_url}" download>PNG 300 DPI</a>`
+                : ""
+            }
+          </div>
+        </div>
+        <textarea class="field page-prompt-input" rows="2"></textarea>
+        <input class="field page-caption-input" type="text" placeholder="Texto / legenda desta página (opcional)" />
+        <div class="chip-row page-chips"></div>
+        ${page.error ? `<p class="error-msg" style="margin: 0;"></p>` : ""}
+      </div>
+    `;
+
+    li.querySelector(".page-scene-title").textContent = page.title || `Página ${page.index}`;
+    const promptEl = li.querySelector(".page-prompt-input");
+    const capEl = li.querySelector(".page-caption-input");
+    promptEl.value = page.prompt || "";
+    capEl.value = page.caption_text || "";
+    if (page.error) li.querySelector(".error-msg").textContent = page.error;
+
+    const thumbImg = li.querySelector(".page-thumb img");
+    if (thumbImg) {
+      thumbImg.addEventListener("click", () => {
+        const items = donePages.map((p) => ({
+          url: p.view_url,
+          caption: `Página ${p.index}${p.title ? ` — ${p.title}` : ""}`,
+        }));
+        const idx = donePages.findIndex((p) => p.index === page.index);
+        openLightbox(items, Math.max(0, idx));
+      });
     }
-  };
-  xhr.onerror = () => {
-    hideBusy();
-    button.disabled = false;
-    errorBox.textContent = "Falha de rede durante a importação.";
-    errorBox.classList.remove("is-hidden");
-  };
-  xhr.ontimeout = () => {
-    hideBusy();
-    button.disabled = false;
-    errorBox.textContent = "A importação demorou demais e foi interrompida.";
-    errorBox.classList.remove("is-hidden");
-  };
-  xhr.send(form);
+
+    const saveEdits = debounce(async () => {
+      await api(`/api/sessions/${state.sid}/pages/${page.index}`, {
+        method: "PATCH",
+        body: JSON.stringify({ prompt: promptEl.value, caption_text: capEl.value }),
+      }).catch(() => {});
+      page.prompt = promptEl.value;
+      page.caption_text = capEl.value;
+    }, 450);
+    promptEl.addEventListener("input", saveEdits);
+    capEl.addEventListener("input", saveEdits);
+
+    li.querySelector(".page-gen-btn").addEventListener("click", () =>
+      generateOnePage(page.index, promptEl.value, capEl.value, page.character_ids)
+    );
+
+    const styleBtn = li.querySelector(".page-style-btn");
+    if (styleBtn) {
+      styleBtn.addEventListener("click", async () => {
+        try {
+          await api(`/api/sessions/${state.sid}/pages/${page.index}/use-as-style`, { method: "POST" });
+          await reloadSession();
+          toast(`Página ${page.index} definida como âncora de estilo deste livro!`);
+        } catch (err) {
+          toast(err.message, true);
+        }
+      });
+    }
+
+    renderCharacterChips(li.querySelector(".page-chips"), page, allChars);
+    list.appendChild(li);
+  }
 }
 
-async function savePageChanges(index) {
-  const session = state.session;
-  if (!session) return;
-  const card = document.querySelector(`.page-card[data-index="${index}"]`);
-  if (!card) return;
-  const textarea = card.querySelector(".page-textarea");
-  const captionInput = card.querySelector(".page-caption");
+function renderAll() {
+  renderHeaderAndStepper();
+  renderPresets();
+  renderStage1Form();
+  renderStage2Characters();
+  renderStage3Story();
+  renderStage4Pages();
+  syncAllPopoverSelects();
+}
+
+/* ==================== ACTIONS ==================== */
+async function reloadSession() {
+  state.session = await api(`/api/sessions/${state.sid}`);
+  renderAll();
+}
+
+async function saveStyleConfig() {
+  const payload = {
+    title: $("#session-title").value.trim(),
+    context_prompt: $("#context").value.trim(),
+    negative_prompt: $("#negative-prompt").value.trim(),
+    page_size: $("#page-size").value,
+    provider: $("#provider").value,
+    model: $("#model").value.trim(),
+    processing: {
+      threshold: $("#proc-threshold").value,
+      min_component_px: Math.max(0, Number($("#proc-min-px").value) || 0),
+      denoise: $("#proc-denoise").checked,
+      crop_to_content: $("#proc-crop").checked,
+    },
+  };
   try {
-    const page = await api(`/api/sessions/${session.id}/pages/${index}`, {
+    state.session = await api(`/api/sessions/${state.sid}`, {
       method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+    renderAll();
+    toast("Padrões do livro salvos.");
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+async function generateOnePage(index, prompt, captionText, characterIds) {
+  state.busyPages.add(index);
+  renderStage4Pages();
+  try {
+    await api(`/api/sessions/${state.sid}/pages/${index}/generate`, {
+      method: "POST",
       body: JSON.stringify({
-        prompt: textarea ? textarea.value : undefined,
-        caption_text: captionInput ? captionInput.value : undefined,
-        character_ids: Array.from(card.querySelectorAll(".char-chip.active")).map(
-          (chip) => chip.dataset.character
-        ),
+        prompt,
+        caption_text: captionText,
+        character_ids: characterIds,
+        provider: $("#provider").value || state.session.provider,
+        model: $("#model").value.trim() || state.session.model,
       }),
     });
-    const idx = session.pages.findIndex((p) => p.index === index);
-    if (idx >= 0) session.pages[idx] = page;
+    await reloadSession();
+    toast(`Página ${index} gerada!`);
   } catch (err) {
-    toast(err.message || "Falha ao salvar a página", true);
+    toast(err.message, true);
+  } finally {
+    state.busyPages.delete(index);
+    renderStage4Pages();
   }
 }
 
-let lightboxIndex = null;
-
-function generatedPages() {
-  if (!state.session) return [];
-  return state.session.pages.filter((p) => p.status === "done" && p.view_url);
+async function generateAllPending() {
+  const pending = state.session.pages.filter((p) => p.status !== "done");
+  if (!pending.length) {
+    toast("Todas as páginas já estão prontas.");
+    return;
+  }
+  const btn = $("#generate-pending");
+  btn.disabled = true;
+  for (const page of pending) {
+    await generateOnePage(page.index, page.prompt, page.caption_text, page.character_ids);
+  }
+  btn.disabled = false;
+  toast("Fila de geração concluída!");
 }
 
-function showLightbox() {
-  const pages = generatedPages();
-  if (!pages.length || lightboxIndex === null) return;
-  lightboxIndex = ((lightboxIndex % pages.length) + pages.length) % pages.length;
-  const page = pages[lightboxIndex];
-  $("#lightbox-img").src = page.view_url;
-  $("#lightbox-img").alt = `Página ${page.index}`;
-  $("#lightbox-caption").textContent = `Página ${page.index} · ${pages.length} geradas`;
-  const multi = pages.length > 1;
-  $("#lightbox-prev").disabled = !multi;
-  $("#lightbox-next").disabled = !multi;
+async function composePdfAction() {
+  for (const sel of ["#compose-btn", "#compose-btn-stage"]) {
+    $(sel).disabled = true;
+    $(sel).textContent = "Gerando PDF…";
+  }
+  try {
+    state.session = await api(`/api/sessions/${state.sid}/compose`, { method: "POST" });
+    renderHeaderAndStepper();
+    toast("PDF KDP pronto para download!");
+  } catch (err) {
+    toast(err.message, true);
+  } finally {
+    for (const sel of ["#compose-btn", "#compose-btn-stage"]) {
+      $(sel).textContent = "Gerar PDF KDP";
+    }
+    renderHeaderAndStepper();
+  }
 }
 
-function openLightbox(index) {
-  const pages = generatedPages();
-  const position = pages.findIndex((p) => p.index === index);
-  if (position === -1) return;
-  lightboxIndex = position;
-  showLightbox();
-  $("#lightbox").classList.remove("is-hidden");
-  document.body.classList.add("lightbox-open");
-  $("#lightbox-close").focus();
+/* ==================== LIGHTBOX ==================== */
+function openLightbox(items, index) {
+  if (!items.length) return;
+  state.lightboxItems = items;
+  state.lightboxIndex = index;
+  updateLightbox();
+  const box = $("#lightbox");
+  box.classList.remove("is-hidden");
+  if (typeof window.gsap !== "undefined") {
+    window.gsap.fromTo(box, { autoAlpha: 0 }, { autoAlpha: 1, duration: 0.2, clearProps: "opacity,visibility" });
+  }
+}
+
+function updateLightbox() {
+  const item = state.lightboxItems[state.lightboxIndex];
+  if (!item) return;
+  $("#lightbox-img").src = item.url;
+  $("#lightbox-caption").textContent = item.caption || "";
+  const multi = state.lightboxItems.length > 1;
+  $("#lightbox-prev").classList.toggle("is-hidden", !multi);
+  $("#lightbox-next").classList.toggle("is-hidden", !multi);
 }
 
 function closeLightbox() {
   $("#lightbox").classList.add("is-hidden");
-  document.body.classList.remove("lightbox-open");
-  $("#lightbox-img").removeAttribute("src");
-  lightboxIndex = null;
 }
 
-function navigateLightbox(delta) {
-  if (lightboxIndex === null) return;
-  lightboxIndex += delta;
-  showLightbox();
+/* ==================== AUTOPILOT POLLING ==================== */
+function renderAutopilot(st) {
+  const bar = $("#autopilot-bar");
+  const isVisible = st && st.status && st.status !== "idle";
+  bar.classList.toggle("is-hidden", !isVisible);
+  if (!isVisible) return;
+
+  const badge = $("#autopilot-badge");
+  badge.classList.remove("pill-ok", "pill-warn", "pill-err");
+  if (st.status === "running") {
+    badge.classList.add("pill-warn");
+    badge.textContent = "Gerando com IA";
+  } else if (st.status === "done") {
+    badge.classList.add("pill-ok");
+    badge.textContent = "Concluído";
+  } else if (st.status === "error") {
+    badge.classList.add("pill-err");
+    badge.textContent = "Erro";
+  } else {
+    badge.textContent = "Cancelado";
+  }
+
+  $("#autopilot-label").textContent = st.label || "";
+  $("#autopilot-pct").textContent = `${st.percent || 0}%`;
+  $("#autopilot-fill").style.width = `${st.percent || 0}%`;
+  $("#autopilot-cancel").classList.toggle("is-hidden", st.status !== "running");
+
+  const errEl = $("#autopilot-error");
+  errEl.classList.toggle("is-hidden", !st.error);
+  if (st.error) errEl.textContent = st.error;
+
+  const running = st.status === "running";
+  $("#autopilot-full-btn").disabled = running;
+  $("#autopilot-plan-btn").disabled = running;
 }
 
-async function generatePending() {
-  const session = state.session;
-  if (!session) return;
-  const pending = session.pages.filter((p) => p.status !== "done" && !state.busy.has(p.index));
-  if (!pending.length) {
-    toast("Nenhuma página pendente.");
+async function pollAutopilot() {
+  try {
+    const st = await api(`/api/sessions/${state.sid}/autopilot`);
+    renderAutopilot(st);
+    if (st.status === "running") {
+      if (st.phase !== state.lastAutopilotPhase || st.phase === "pages" || st.phase === "sheets") {
+        state.lastAutopilotPhase = st.phase;
+        await reloadSession();
+      }
+      if (!state.autopilotTimer) {
+        state.autopilotTimer = setInterval(pollAutopilot, 1800);
+      }
+    } else {
+      if (state.autopilotTimer) {
+        clearInterval(state.autopilotTimer);
+        state.autopilotTimer = null;
+        await reloadSession();
+        if (st.status === "done") {
+          setStep(st.current_step || 4, { animate: true, persist: false });
+          toast(st.label || "Autopilot concluído!");
+        }
+      }
+    }
+  } catch (_) {}
+}
+
+async function triggerAutopilot(stopAfter) {
+  try {
+    await saveStyleConfig();
+    const st = await api(`/api/sessions/${state.sid}/autopilot`, {
+      method: "POST",
+      body: JSON.stringify({
+        preset_id: state.session.preset_id,
+        pages: state.session.pages.length || 12,
+        premise_hint: $("#story-premise").value.trim(),
+        language: $("#story-language")?.value || state.session.language || "en",
+        stop_after: stopAfter,
+      }),
+    });
+    renderAutopilot(st);
+    if (!state.autopilotTimer) {
+      state.autopilotTimer = setInterval(pollAutopilot, 1800);
+    }
+    toast("Autopilot iniciado! Acompanhe o progresso acima.");
+  } catch (err) {
+    toast(err.message, true);
+  }
+}
+
+/* ==================== AUTH MODAL ==================== */
+function renderAuth() {
+  const pill = $("#auth-pill");
+  const label = $("#auth-pill-label");
+  const c = state.codex;
+  if (!c) return;
+  pill.classList.remove("pill-ok", "pill-warn");
+  if (c.authenticated) {
+    pill.classList.add("pill-ok");
+    label.textContent = "ChatGPT conectado";
+  } else if (c.pending) {
+    pill.classList.add("pill-warn");
+    label.textContent = "Aguardando código…";
+  } else {
+    label.textContent = "Conectar ChatGPT";
+  }
+
+  $("#codex-connect").classList.toggle("is-hidden", c.authenticated);
+  $("#codex-logout").classList.toggle("is-hidden", !c.authenticated);
+  $("#codex-code").classList.toggle("is-hidden", !c.pending || !c.user_code);
+  if (c.user_code) {
+    $("#codex-user-code").textContent = c.user_code;
+    $("#codex-link").href = c.verification_url;
+  }
+  const errEl = $("#codex-error");
+  errEl.classList.toggle("is-hidden", !c.error);
+  if (c.error) errEl.textContent = c.error;
+
+  if (c.pending && !state.codexTimer) {
+    state.codexTimer = setInterval(refreshAuth, 2500);
+  } else if (!c.pending && state.codexTimer) {
+    clearInterval(state.codexTimer);
+    state.codexTimer = null;
+  }
+}
+
+async function refreshAuth() {
+  try {
+    state.codex = await api("/api/auth/codex");
+    renderAuth();
+    if (state.codex.authenticated) {
+      const m = await api("/api/auth/codex/models").catch(() => ({ models: [], cheapest: null }));
+      state.codexModels = m.models || [];
+      state.codexCheapest = m.cheapest || null;
+      renderModelSuggestions({ preferred: state.session?.model });
+    }
+  } catch (_) {}
+}
+
+/* ==================== BINDINGS & INIT ==================== */
+function bindEvents() {
+  $$(".step-tab").forEach((tab) => {
+    tab.addEventListener("click", () => setStep(Number(tab.dataset.step)));
+  });
+  $$("[data-goto-step]").forEach((btn) => {
+    btn.addEventListener("click", () => setStep(Number(btn.dataset.gotoStep)));
+  });
+
+  $("#session-title").addEventListener(
+    "input",
+    debounce(async () => {
+      const title = $("#session-title").value.trim();
+      if (!title) return;
+      state.session = await api(`/api/sessions/${state.sid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      }).catch(() => state.session);
+      renderHeaderAndStepper();
+    }, 500)
+  );
+
+  $("#provider").addEventListener("change", () => renderModelSuggestions({ forceCheapest: true }));
+  $("#save-style-config").addEventListener("click", saveStyleConfig);
+  $("#autopilot-full-btn").addEventListener("click", () => triggerAutopilot("pdf"));
+  $("#autopilot-plan-btn").addEventListener("click", () => triggerAutopilot("blueprint"));
+  $("#autopilot-cancel").addEventListener("click", async () => {
+    const st = await api(`/api/sessions/${state.sid}/autopilot/cancel`, { method: "POST" });
+    renderAutopilot(st);
+  });
+
+  // Save custom preset modal
+  $("#save-custom-preset-btn").addEventListener("click", () => {
+    $("#custom-preset-name").value = "";
+    $("#custom-preset-tagline").value = "";
+    $("#preset-modal").classList.remove("is-hidden");
+  });
+  $("#preset-modal-close").addEventListener("click", () => $("#preset-modal").classList.add("is-hidden"));
+  $("#custom-preset-save").addEventListener("click", async () => {
+    const name = $("#custom-preset-name").value.trim();
+    if (!name) return toast("Informe um nome para o preset.", true);
+    try {
+      const created = await api("/api/presets", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          tagline: $("#custom-preset-tagline").value.trim(),
+          page_size: $("#page-size").value,
+          context_prompt: $("#context").value.trim(),
+          negative_prompt: $("#negative-prompt").value.trim(),
+          processing: {
+            threshold: $("#proc-threshold").value,
+            min_component_px: Math.max(0, Number($("#proc-min-px").value) || 0),
+            denoise: $("#proc-denoise").checked,
+            crop_to_content: $("#proc-crop").checked,
+          },
+        }),
+      });
+      state.presets = await api("/api/presets");
+      $("#preset-modal").classList.add("is-hidden");
+      renderPresets();
+      toast(`Preset "${created.name}" salvo!`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  // Per-book style anchor
+  $("#style-generate-btn").addEventListener("click", async () => {
+    const btn = $("#style-generate-btn");
+    const errEl = $("#style-error");
+    errEl.classList.add("is-hidden");
+    btn.disabled = true;
+    btn.textContent = "Gerando âncora de estilo…";
+    try {
+      await saveStyleConfig();
+      await api(`/api/sessions/${state.sid}/style/generate`, {
+        method: "POST",
+        body: JSON.stringify({ sample_subject: $("#style-sample-subject").value.trim() }),
+      });
+      await reloadSession();
+      toast("Âncora visual de estilo gerada!");
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("is-hidden");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Gerar âncora de estilo com IA";
+    }
+  });
+
+  $("#style-upload").addEventListener("click", async () => {
+    const file = $("#style-file").files?.[0];
+    if (!file) return toast("Selecione uma imagem de estilo.", true);
+    const form = new FormData();
+    form.append("image", file);
+    try {
+      await api(`/api/sessions/${state.sid}/style`, { method: "POST", body: form });
+      $("#style-file").value = "";
+      await reloadSession();
+      toast("Âncora de estilo enviada!");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("#style-remove").addEventListener("click", async () => {
+    await api(`/api/sessions/${state.sid}/style`, { method: "DELETE" });
+    await reloadSession();
+    toast("Âncora de estilo removida.");
+  });
+
+  // Stage 2: Character Sheet
+  $("#char-add-btn").addEventListener("click", async () => {
+    const errEl = $("#char-error");
+    errEl.classList.add("is-hidden");
+    const name = $("#char-name").value.trim();
+    const desc = $("#char-desc").value.trim();
+    const file = $("#char-file").files?.[0];
+    if (!name) {
+      errEl.textContent = "Informe o nome do personagem.";
+      errEl.classList.remove("is-hidden");
+      return;
+    }
+    const form = new FormData();
+    form.append("name", name);
+    form.append("description", desc);
+    if (file) form.append("image", file);
+    try {
+      await api(`/api/sessions/${state.sid}/characters`, { method: "POST", body: form });
+      $("#char-name").value = "";
+      $("#char-desc").value = "";
+      $("#char-file").value = "";
+      await reloadSession();
+      toast(`Personagem "${name}" adicionado!`);
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("is-hidden");
+    }
+  });
+
+  $("#global-char-import").addEventListener("click", async () => {
+    const cid = $("#global-char-select").value;
+    if (!cid) return;
+    try {
+      await api(`/api/sessions/${state.sid}/characters/import-global/${cid}`, { method: "POST" });
+      await reloadSession();
+      toast("Personagem importado para o livro!");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  // Stage 3: Story & Captions
+  $$("[data-story-mode]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const mode = btn.dataset.storyMode;
+      await api(`/api/sessions/${state.sid}/story`, {
+        method: "PATCH",
+        body: JSON.stringify({ mode }),
+      });
+      state.session.story_mode = mode;
+      renderStage3Story();
+    });
+  });
+
+  $("#story-language").addEventListener("change", async () => {
+    state.session = await api(`/api/sessions/${state.sid}`, {
+      method: "PATCH",
+      body: JSON.stringify({ language: $("#story-language").value }),
+    });
+  });
+
+  $("#story-save-btn").addEventListener("click", async () => {
+    try {
+      await api(`/api/sessions/${state.sid}/story`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          premise: $("#story-premise").value,
+          synopsis: $("#story-synopsis").value,
+        }),
+      });
+      toast("Sinopse salva.");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("#story-generate-btn").addEventListener("click", async () => {
+    const errEl = $("#story-error");
+    errEl.classList.add("is-hidden");
+    const premise = $("#story-premise").value.trim();
+    if (!premise) {
+      errEl.textContent = "Descreva a ideia ou tema do livro para gerar o roteiro.";
+      errEl.classList.remove("is-hidden");
+      return;
+    }
+    const btn = $("#story-generate-btn");
+    btn.disabled = true;
+    btn.textContent = "Roteirizando páginas…";
+    try {
+      const res = await api(`/api/sessions/${state.sid}/story/generate`, {
+        method: "POST",
+        body: JSON.stringify({
+          premise,
+          mode: state.session.story_mode || "narrative",
+          pages: Math.max(1, Math.min(200, Number($("#story-pages").value) || 12)),
+          language: $("#story-language").value,
+        }),
+      });
+      await reloadSession();
+      toast(`Roteiro criado com ${res.pages_updated} página(s) prontas!`);
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.classList.remove("is-hidden");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Gerar roteiro e dividir páginas";
+    }
+  });
+
+  const saveCaptionSettings = async () => {
+    state.session = await api(`/api/sessions/${state.sid}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        caption_enabled: $("#caption-enabled").checked,
+        caption_style: $("#caption-style").value,
+        caption_position: $("#caption-position").value,
+        caption_font_family: $("#caption-font").value,
+        caption_font_bold: $("#caption-weight").value === "bold",
+        caption_font_size: Number($("#caption-size").value),
+      }),
+    });
+    renderStage3Story();
+  };
+  for (const sel of ["#caption-enabled", "#caption-style", "#caption-position", "#caption-font", "#caption-weight", "#caption-size"]) {
+    $(sel).addEventListener("change", saveCaptionSettings);
+  }
+
+  // Stage 4: KDP options & PDF
+  const saveKdpOptions = async () => {
+    state.session = await api(`/api/sessions/${state.sid}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        blank_verso: $("#kdp-blank-verso").checked,
+        include_title_page: $("#kdp-title-page").checked,
+        include_belongs_to_page: $("#kdp-belongs-to").checked,
+        include_color_test_page: $("#kdp-color-test").checked,
+      }),
+    });
+    renderHeaderAndStepper();
+  };
+  for (const sel of ["#kdp-blank-verso", "#kdp-title-page", "#kdp-belongs-to", "#kdp-color-test"]) {
+    $(sel).addEventListener("change", saveKdpOptions);
+  }
+
+  $("#generate-pending").addEventListener("click", generateAllPending);
+  $("#compose-btn").addEventListener("click", composePdfAction);
+  $("#compose-btn-stage").addEventListener("click", composePdfAction);
+
+  // Lightbox
+  $("#lightbox-close").addEventListener("click", closeLightbox);
+  $("#lightbox").addEventListener("click", (ev) => {
+    if (ev.target === $("#lightbox")) closeLightbox();
+  });
+  $("#lightbox-prev").addEventListener("click", () => {
+    state.lightboxIndex = (state.lightboxIndex - 1 + state.lightboxItems.length) % state.lightboxItems.length;
+    updateLightbox();
+  });
+  $("#lightbox-next").addEventListener("click", () => {
+    state.lightboxIndex = (state.lightboxIndex + 1) % state.lightboxItems.length;
+    updateLightbox();
+  });
+  document.addEventListener("keydown", (ev) => {
+    if ($("#lightbox").classList.contains("is-hidden")) return;
+    if (ev.key === "Escape") closeLightbox();
+    if (ev.key === "ArrowLeft") $("#lightbox-prev").click();
+    if (ev.key === "ArrowRight") $("#lightbox-next").click();
+  });
+
+  // Auth modal
+  $("#auth-pill").addEventListener("click", () => $("#auth-modal").classList.remove("is-hidden"));
+  $("#auth-modal-close").addEventListener("click", () => $("#auth-modal").classList.add("is-hidden"));
+  $("#auth-modal").addEventListener("click", (ev) => {
+    if (ev.target === $("#auth-modal")) $("#auth-modal").classList.add("is-hidden");
+  });
+  $("#codex-connect").addEventListener("click", async () => {
+    state.codex = await api("/api/auth/codex/start", { method: "POST" });
+    renderAuth();
+  });
+  $("#codex-logout").addEventListener("click", async () => {
+    state.codex = await api("/api/auth/codex/logout", { method: "POST" });
+    renderAuth();
+    toast("Conta ChatGPT desconectada.");
+  });
+}
+
+async function init() {
+  state.sid = sessionIdFromUrl();
+  if (!state.sid) {
+    window.location.href = "/";
     return;
   }
-  for (const page of pending) {
-    await generatePage(page.index);
-    const latest = state.session.pages.find((p) => p.index === page.index);
-    if (latest && latest.status === "error") break;
-  }
-}
 
-async function composePdf() {
-  const session = state.session;
-  if (!session) return;
-  const btn = $("#compose-btn");
-  const original = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = "Compondo…";
-  try {
-    state.session = await api(`/api/sessions/${session.id}/compose`, { method: "POST" });
-    toast("PDF pronto.");
-    render();
-  } catch (err) {
-    toast(err.message || "Falha ao compor PDF", true);
-  } finally {
-    btn.textContent = original;
-    btn.disabled = false;
-  }
-}
-
-function bind() {
-  const persist = () =>
-    saveSettings().catch(async (err) => {
-      toast(err.message, true);
-      if (state.session) {
-        try {
-          await refreshSession();
-        } catch (_) {}
-        render();
-      }
-    });
-  const debouncedSave = debounce(persist, 350);
-  const saveNow = () => persist();
-
-  $("#context").addEventListener("input", debouncedSave);
-  $("#provider").addEventListener("change", saveNow);
-  $("#model").addEventListener("change", saveNow);
-  $("#session-title").addEventListener("input", debouncedSave);
-  $("#session-title").addEventListener("change", saveNow);
-  $("#pages-count").addEventListener("input", debouncedSave);
-  $("#pages-count").addEventListener("change", saveNow);
-  $("#pages-count").addEventListener("blur", saveNow);
-  $("#save-context").addEventListener("click", () => {
-    saveSettings().catch((err) => toast(err.message, true));
-  });
-
-  $("#caption-enabled").addEventListener("change", () => {
-    updateCaptionFields();
-    saveNow();
-  });
-  $("#caption-style").addEventListener("change", saveNow);
-  $("#caption-position").addEventListener("change", saveNow);
-  $("#caption-font").addEventListener("change", saveNow);
-  $("#caption-weight").addEventListener("change", saveNow);
-  $("#caption-size").addEventListener("change", saveNow);
-
-  $("#page-list").addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    const thumb = event.target.closest('.thumb[data-action="lightbox"]');
-    if (!thumb) return;
-    event.preventDefault();
-    const card = thumb.closest(".page-card");
-    openLightbox(Number(card.dataset.index));
-  });
-
-  $("#page-list").addEventListener("change", (event) => {
-    const target = event.target;
-    if (!target.matches(".page-textarea, .page-caption")) return;
-    const card = target.closest(".page-card");
-    if (card) savePageChanges(Number(card.dataset.index));
-  });
-
-  $("#page-list").addEventListener("click", (event) => {
-    const btn = event.target.closest('[data-action="generate"]');
-    if (!btn) return;
-    const card = btn.closest(".page-card");
-    generatePage(Number(card.dataset.index));
-  });
-
-  $("#lightbox-close").addEventListener("click", closeLightbox);
-  $("#lightbox-prev").addEventListener("click", () => navigateLightbox(-1));
-  $("#lightbox-next").addEventListener("click", () => navigateLightbox(1));
-  $("#lightbox").addEventListener("click", (event) => {
-    if (event.target === $("#lightbox")) closeLightbox();
-  });
-  document.addEventListener("keydown", (event) => {
-    if ($("#lightbox").classList.contains("is-hidden")) return;
-    if (event.key === "Escape") closeLightbox();
-    else if (event.key === "ArrowLeft") navigateLightbox(-1);
-    else if (event.key === "ArrowRight") navigateLightbox(1);
-  });
-
-  $("#session-select").addEventListener("change", (event) => {
-    const value = event.target.value;
-    if (!value) return;
-    window.location.href = `/books/${value}`;
-  });
-
-  $("#import-btn").addEventListener("click", importBackup);
-
-  $("#style-upload").addEventListener("click", uploadStyle);
-  $("#style-remove").addEventListener("click", removeStyle);
-
-  $("#character-add").addEventListener("click", addCharacter);
-  $("#character-list").addEventListener("click", (event) => {
-    const button = event.target.closest("[data-character-remove]");
-    if (button) removeCharacter(button.dataset.characterRemove);
-  });
-
-  $("#page-list").addEventListener("click", (event) => {
-    const thumb = event.target.closest('.thumb[data-action="lightbox"]');
-    if (thumb) {
-      const card = thumb.closest(".page-card");
-      openLightbox(Number(card.dataset.index));
-      return;
-    }
-    const styleBtn = event.target.closest('[data-action="use-style"]');
-    if (styleBtn) {
-      const card = styleBtn.closest(".page-card");
-      usePageAsStyle(Number(card.dataset.index));
-      return;
-    }
-    const chip = event.target.closest(".char-chip");
-    if (!chip) return;
-    chip.classList.toggle("active");
-    const active = chip.classList.contains("active");
-    chip.setAttribute("aria-pressed", active ? "true" : "false");
-    const card = chip.closest(".page-card");
-    if (card) savePageChanges(Number(card.dataset.index));
-  });
-
-  $("#codex-connect").addEventListener("click", connectCodex);
-  $("#codex-logout").addEventListener("click", logoutCodex);
-
-  $("#generate-pending").addEventListener("click", generatePending);
-  $("#compose-btn").addEventListener("click", composePdf);
-
-  $("#new-session").addEventListener("click", async () => {
-    const count = clampPages($("#pages-count").value);
-    try {
-      await saveSettings(true);
-      await createSession(count, $("#session-title").value);
-    } catch (err) {
-      toast(err.message || "Falha ao criar sessão", true);
-    }
-  });
-}
-
-async function checkServerVersion() {
   try {
     const meta = await api("/api/meta");
-    const features = Array.isArray(meta.features) ? meta.features : [];
-    const ok =
-      features.includes("characters") &&
-      features.includes("lightbox") &&
-      features.includes("backup") &&
-      features.includes("sessions-list") &&
-      features.includes("multi-book");
-    $("#server-banner").classList.toggle("is-hidden", ok);
-  } catch (_) {
-    $("#server-banner").classList.remove("is-hidden");
-  }
+    if (!meta.features?.includes("presets")) {
+      $("#server-banner").classList.remove("is-hidden");
+    }
+  } catch (_) {}
+
+  const [defaults, presets, globalChars, session] = await Promise.all([
+    api("/api/defaults").catch(() => null),
+    api("/api/presets").catch(() => []),
+    api("/api/characters").catch(() => []),
+    api(`/api/sessions/${state.sid}`),
+  ]);
+
+  state.defaults = defaults;
+  state.presets = presets;
+  state.categories = await api("/api/presets/categories").catch(() => []);
+  state.globalCharacters = globalChars;
+  state.session = session;
+
+  bindEvents();
+  renderAll();
+  setStep(session.current_step || 1, { animate: true, persist: false });
+  await Promise.all([refreshAuth(), pollAutopilot()]);
 }
 
-async function boot() {
-  bind();
-  await checkServerVersion();
-  try {
-    state.defaults = await api("/api/defaults");
-  } catch (err) {
-    $("#pages-subtitle").textContent = "Falha ao carregar configuração.";
-    toast(err.message, true);
-    return;
-  }
-
-  await loadSettings();
-  await loadCharacters();
-  renderCharacters();
-  await loadStyle();
-  await refreshCodex();
-
-  const eff = effectiveSettings();
-  fillProviderOptions();
-  $("#context").value = eff.context_prompt;
-  $("#provider").value = eff.provider;
-  $("#model").value = eff.model;
-  applyProviderDefaults(eff.provider);
-  $("#session-title").value = eff.title;
-  $("#pages-count").value = eff.pages;
-  $("#caption-enabled").checked = eff.caption_enabled;
-  $("#caption-style").value = eff.caption_style;
-  $("#caption-position").value = eff.caption_position;
-  setSelectValue($("#caption-font"), eff.caption_font_family || "sans");
-  setSelectValue($("#caption-weight"), eff.caption_font_bold ? "bold" : "normal");
-  setSelectValue($("#caption-size"), eff.caption_font_size || 0.032);
-  updateCaptionFields();
-
-  const sessionId = pathSessionId();
-  if (!sessionId) {
-    window.location.replace("/");
-    return;
-  }
-  try {
-    state.session = await api(`/api/sessions/${sessionId}`);
-  } catch (_) {
-    window.location.replace("/");
-    return;
-  }
-  if (!state.settings) {
-    state.settings = {
-      title: state.session.title,
-      pages: state.session.pages.length,
-      context_prompt: state.session.context_prompt,
-      provider: state.session.provider,
-      model: state.session.model,
-      caption_enabled: state.session.caption_enabled,
-      caption_style: state.session.caption_style,
-      caption_position: state.session.caption_position,
-      caption_font_family: state.session.caption_font_family,
-      caption_font_bold: state.session.caption_font_bold,
-      caption_font_size: state.session.caption_font_size,
-    };
-    try {
-      state.settings = await api("/api/settings", {
-        method: "PUT",
-        body: JSON.stringify(state.settings),
-      });
-    } catch (_) {}
-  }
-  if (
-    state.codex &&
-    state.codex.authenticated &&
-    !state.defaults.openai_configured &&
-    state.session.provider === "openai"
-  ) {
-    try {
-      await useCodexProvider();
-    } catch (_) {}
-  }
-  await loadSessions();
-  render();
-}
-
-boot();
+init();

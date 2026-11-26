@@ -3,239 +3,489 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Color Book Studio</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2317171a'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%23f6f4ef' stroke-width='2'/%3E%3C/svg%3E" />
+    <title>Color Book Studio — Estúdio</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232b1846'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23e6dcf5' stroke-width='2.4'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/static/styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js" integrity="sha384-g4NTh/Iv5PPU4xPyhEWqPcwtNXOvdaDI8LLnyYfyNZOjKJeYQyjzQ9X5275eBjpt" crossorigin="anonymous" defer></script>
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <span class="mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6">
-            <rect x="3" y="3" width="18" height="18" rx="3" />
-            <path d="M3 9h18M9 3v18" opacity=".45" />
-            <circle cx="15" cy="15" r="3.2" />
-          </svg>
-        </span>
-        <span class="brand-name">Color Book Studio</span>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="studio-topbar-title">
+          <a class="btn btn-ghost btn-sm" href="/" title="Voltar para biblioteca">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
+            Biblioteca
+          </a>
+          <input id="session-title" class="title-inline-input" type="text" aria-label="Título do livro" spellcheck="false" />
+        </div>
+
+        <div class="topbar-meta">
+          <span class="pill" id="meta-format">8.5x8.5 · 300 DPI</span>
+          <button class="pill" id="auth-pill" type="button" title="Conta ChatGPT Plus / Codex">
+            <span class="pill-dot"></span>
+            <span id="auth-pill-label">Verificando…</span>
+          </button>
+        </div>
+
+        <div class="topbar-actions">
+          <a class="btn btn-ghost btn-sm" id="export-book-zip" href="#">Exportar .zip</a>
+          <button class="btn btn-outline btn-sm" id="compose-btn" type="button" disabled>Gerar PDF</button>
+          <a class="btn btn-primary btn-sm is-hidden" id="pdf-link" href="#" target="_blank" rel="noopener">Abrir PDF</a>
+        </div>
+      </header>
+
+      <div class="server-banner is-hidden" id="server-banner">
+        Servidor desatualizado: reinicie <code>uv run cbg web</code> para carregar as últimas mudanças.
       </div>
-      <div class="meta" id="meta"></div>
-      <label class="session-switch">
-        <span>Sessão</span>
-        <select id="session-select" aria-label="Trocar de sessão"></select>
-      </label>
-      <div class="topbar-actions">
-        <a class="btn btn-ghost" href="/">Livros</a>
-        <button class="btn btn-ghost" id="compose-btn" disabled>Gerar PDF</button>
-        <a class="btn btn-primary is-hidden" id="pdf-link" href="#" target="_blank" rel="noopener">Abrir PDF</a>
+
+      <!-- 4-Step Pipeline Stepper -->
+      <nav class="stepper-wrap" aria-label="Etapas de criação do livro">
+        <div class="stepper" id="stepper">
+          <button class="step-tab is-active" type="button" data-step="1">
+            <span class="step-num">1</span>
+            <span class="step-text">
+              <span class="step-title">Estilo &amp; Categoria</span>
+              <span class="step-sub" id="step-1-sub">Preset, traço e âncora</span>
+            </span>
+          </button>
+          <button class="step-tab" type="button" data-step="2">
+            <span class="step-num">2</span>
+            <span class="step-text">
+              <span class="step-title">Character Sheet</span>
+              <span class="step-sub" id="step-2-sub">0 personagens</span>
+            </span>
+          </button>
+          <button class="step-tab" type="button" data-step="3">
+            <span class="step-num">3</span>
+            <span class="step-text">
+              <span class="step-title">História &amp; Roteiro</span>
+              <span class="step-sub" id="step-3-sub">Divisão em páginas</span>
+            </span>
+          </button>
+          <button class="step-tab" type="button" data-step="4">
+            <span class="step-num">4</span>
+            <span class="step-text">
+              <span class="step-title">Páginas &amp; PDF KDP</span>
+              <span class="step-sub" id="step-4-sub">0 / 0 prontas</span>
+            </span>
+          </button>
+        </div>
+      </nav>
+
+      <!-- Live Autopilot Banner -->
+      <div class="autopilot-bar is-hidden" id="autopilot-bar" role="status" aria-live="polite">
+        <div class="autopilot-bar-top">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <span class="pill pill-warn" id="autopilot-badge">Autopilot</span>
+            <strong id="autopilot-label">Preparando geração completa…</strong>
+          </div>
+          <div class="topbar-actions">
+            <span class="pill" id="autopilot-pct">0%</span>
+            <button class="btn btn-danger-ghost btn-sm" id="autopilot-cancel" type="button">Cancelar</button>
+          </div>
+        </div>
+        <div class="book-progress-track">
+          <div class="book-progress-fill" id="autopilot-fill" style="width: 0%;"></div>
+        </div>
+        <p class="error-msg is-hidden" id="autopilot-error" style="margin-top: 8px;"></p>
       </div>
-    </header>
 
-    <div class="server-banner is-hidden" id="server-banner">
-      Servidor desatualizado: reinicie <code>uv run cbg web</code> para carregar as últimas mudanças.
-    </div>
-
-    <main class="layout">
-      <aside class="panel">
-        <div class="panel-block">
-          <h2>Padrões da página</h2>
-          <p class="hint">
-            Prompt de contexto aplicado a todas as imagens. Descreva estilo, traço,
-            fundo e composição.
-          </p>
-          <textarea id="context" class="field field-context" rows="9" spellcheck="false"></textarea>
-          <div class="panel-row">
-            <label class="mini-field">
-              <span>Provedor</span>
-              <select id="provider" class="field"></select>
-            </label>
-            <label class="mini-field">
-              <span>Modelo</span>
-              <input id="model" class="field" type="text" spellcheck="false" list="model-options" autocomplete="off" />
-              <datalist id="model-options"></datalist>
-            </label>
-          </div>
-          <div class="panel-row">
-            <label class="mini-field grow">
-              <span>Título</span>
-              <input id="session-title" class="field" type="text" spellcheck="false" />
-            </label>
-            <label class="mini-field">
-              <span>Páginas</span>
-              <input id="pages-count" class="field" type="number" min="1" max="200" value="12" />
-            </label>
-          </div>
-          <label class="check-field">
-            <input type="checkbox" id="caption-enabled" />
-            <span>Legenda / balão nas páginas</span>
-          </label>
-          <div class="caption-options" id="caption-options">
-            <div class="panel-row">
-              <label class="mini-field">
-                <span>Estilo</span>
-                <select id="caption-style" class="field">
-                  <option value="balloon">Balão de fala</option>
-                  <option value="caption">Legenda</option>
-                </select>
-              </label>
-              <label class="mini-field">
-                <span>Posição</span>
-                <select id="caption-position" class="field">
-                  <option value="bottom">Base</option>
-                  <option value="top">Topo</option>
-                </select>
-              </label>
+      <main class="studio-main">
+        <!-- ==================== STAGE 1: ESTILO & CATEGORIA ==================== -->
+        <section class="stage-panel" id="stage-1" data-stage="1">
+          <div class="stage-head">
+            <div class="stage-head-left">
+              <div class="stage-title-row">
+                <span class="stage-big-num">1.</span>
+                <h1>Estilo e categoria</h1>
+              </div>
+              <p class="hint">
+                Escolha um estilo para configurar traço, formato e binarização, ou gere o livro inteiro direto.
+              </p>
             </div>
-            <div class="panel-row">
-              <label class="mini-field">
-                <span>Fonte</span>
-                <select id="caption-font" class="field">
-                  <option value="sans">Sans</option>
-                  <option value="serif">Serif</option>
-                  <option value="mono">Mono</option>
-                </select>
-              </label>
-              <label class="mini-field">
-                <span>Peso</span>
-                <select id="caption-weight" class="field">
-                  <option value="normal">Normal</option>
-                  <option value="bold">Negrito</option>
-                </select>
-              </label>
-            </div>
-            <div class="panel-row">
-              <label class="mini-field grow">
-                <span>Tamanho</span>
-                <select id="caption-size" class="field">
-                  <option value="0.024">Pequeno</option>
-                  <option value="0.032">Médio</option>
-                  <option value="0.04">Grande</option>
-                  <option value="0.048">Extra</option>
-                </select>
-              </label>
+            <div class="topbar-actions" style="flex-wrap: wrap;">
+              <button class="btn btn-accent btn-sm" id="autopilot-full-btn" type="button">Gerar livro completo</button>
+              <button class="btn btn-outline btn-sm" id="autopilot-plan-btn" type="button">Planejar roteiro</button>
+              <button class="btn btn-ghost btn-sm" id="save-custom-preset-btn" type="button">Salvar preset</button>
             </div>
           </div>
-          <div class="panel-actions">
-            <button class="btn btn-outline" id="save-context">Salvar padrões</button>
-            <button class="btn btn-ghost" id="new-session">Novo livro</button>
-          </div>
-          <p class="hint panel-footnote">Cria um novo livro usando estes padrões.</p>
-          <p class="saved" id="saved-note"></p>
-        </div>
 
-        <div class="panel-block">
-          <h2>Personagens</h2>
-          <p class="hint">
-            Envie imagens de referência (nome + foto) para manter o mesmo
-            personagem fiel em todas as páginas.
-          </p>
-          <ul class="character-list" id="character-list"></ul>
-          <p class="char-empty" id="char-empty">Nenhum personagem ainda.</p>
-          <div class="char-form">
-            <input id="character-name" class="field" type="text" placeholder="Nome do personagem" />
-            <input id="character-file" class="field" type="file" accept="image/*" />
-            <button class="btn btn-outline btn-block" id="character-add">Adicionar personagem</button>
-          </div>
-          <p class="error-msg is-hidden" id="character-error"></p>
-        </div>
+          <div id="studio-style-picker"></div>
 
-        <div class="panel-block">
-          <h2>Estilo (referência)</h2>
-          <p class="hint">
-            Use uma imagem/página como fonte visual: traço, nível de detalhe e
-            composição serão repetidos em todas as gerações.
-          </p>
-          <div class="style-preview" id="style-preview">
-            <span>Nenhum estilo definido.</span>
-          </div>
-          <input id="style-file" class="field" type="file" accept="image/*" />
-          <div class="panel-actions">
-            <button class="btn btn-outline" id="style-upload">Definir estilo</button>
-            <button class="btn btn-ghost" id="style-remove">Remover</button>
-          </div>
-          <p class="error-msg is-hidden" id="style-error"></p>
-        </div>
+          <div class="stage-split">
+            <div class="floating-card">
+              <h3>Configuração do livro</h3>
+              <label class="field-label">
+                <span>Prompt de estilo</span>
+                <textarea id="context" class="field" rows="5" spellcheck="false"></textarea>
+              </label>
 
-        <div class="panel-block">
-          <div class="auth-head">
-            <h2>Conta ChatGPT</h2>
-            <span class="status" id="codex-status" data-kind="pending">verificando</span>
+              <label class="field-label">
+                <span>Evitar no desenho</span>
+                <input id="negative-prompt" class="field" type="text" spellcheck="false" />
+              </label>
+
+              <div class="field-row">
+                <label class="field-label">
+                  <span>Formato</span>
+                  <select id="page-size" class="field">
+                    <option value="square_8.5x8.5">Quadrado 8.5 x 8.5 in</option>
+                    <option value="letter_8.5x11">Carta 8.5 x 11 in</option>
+                    <option value="6x9">6 x 9 in</option>
+                    <option value="square_8x8">Quadrado 8 x 8 in</option>
+                    <option value="8x10">8 x 10 in</option>
+                    <option value="a4">A4</option>
+                  </select>
+                </label>
+                <label class="field-label">
+                  <span>Provedor</span>
+                  <select id="provider" class="field"></select>
+                </label>
+                <label class="field-label">
+                  <span>Modelo</span>
+                  <select id="model" class="field"></select>
+                </label>
+              </div>
+
+              <div class="field-row">
+                <label class="field-label">
+                  <span>Binarização P&amp;B</span>
+                  <select id="proc-threshold" class="field">
+                    <option value="otsu">Otsu (traço grosso)</option>
+                    <option value="adaptive">Adaptativo (detalhes finos)</option>
+                    <option value="fixed">Limiar fixo</option>
+                  </select>
+                </label>
+                <label class="field-label">
+                  <span>Limpeza mínima (px)</span>
+                  <input id="proc-min-px" class="field" type="number" min="0" max="200" value="24" />
+                </label>
+                <label class="field-label" style="justify-content: flex-end; gap: 10px;">
+                  <label class="check-toggle">
+                    <input type="checkbox" id="proc-denoise" />
+                    <span>Suavizar ruído</span>
+                  </label>
+                  <label class="check-toggle">
+                    <input type="checkbox" id="proc-crop" />
+                    <span>Recortar margens</span>
+                  </label>
+                </label>
+              </div>
+
+              <div class="topbar-actions">
+                <button class="btn btn-primary btn-sm" id="save-style-config" type="button">Salvar alterações</button>
+              </div>
+            </div>
+
+            <div class="floating-card">
+              <h3>Referência de estilo</h3>
+              <p class="hint" style="font-size: 0.84rem;">
+                Usada como referência visual em todas as gerações deste livro.
+              </p>
+              <div class="anchor-preview" id="style-preview">
+                <span>Nenhuma referência definida.</span>
+              </div>
+              <label class="field-label">
+                <span>Cena de teste</span>
+                <input id="style-sample-subject" class="field" type="text" placeholder="Ex: casinha acolhedora com gato na janela" />
+              </label>
+              <button class="btn btn-accent btn-block btn-sm" id="style-generate-btn" type="button">Gerar referência de estilo</button>
+              <div class="field-row" style="grid-template-columns: 1fr auto;">
+                <input id="style-file" class="field" style="padding: 7px 10px; font-size: 0.82rem;" type="file" accept="image/*" />
+                <button class="btn btn-outline btn-sm" id="style-upload" type="button">Enviar</button>
+              </div>
+              <button class="btn btn-danger-ghost btn-sm is-hidden" id="style-remove" type="button">Remover referência</button>
+              <p class="error-msg is-hidden" id="style-error"></p>
+            </div>
           </div>
-          <p class="hint">
-            Use seu plano Plus/Codex como provedor de imagens (provider
-            <code>codex</code>).
-          </p>
-          <div class="auth-code is-hidden" id="codex-code">
-            <p>
-              Abra
-              <a id="codex-link" href="https://auth.openai.com/codex/device" target="_blank" rel="noopener">auth.openai.com/codex/device</a>
-              e informe o código:
-            </p>
-            <code id="codex-user-code"></code>
+
+          <div class="stage-footer">
+            <span></span>
+            <button class="btn btn-primary btn-sm" type="button" data-goto-step="2">Ir para personagens</button>
           </div>
-          <p class="error-msg is-hidden" id="codex-error"></p>
-          <button class="btn btn-outline btn-block" id="codex-connect">Conectar ChatGPT</button>
-          <button class="btn btn-ghost btn-block is-hidden" id="codex-logout">Desconectar</button>
-        </div>
+        </section>
 
-        <div class="panel-block">
-          <h2>Backup</h2>
-          <p class="hint">
-            Exporta e importa tudo: sessões, páginas geradas, personagens, estilo e
-            padrões. Credenciais de login não entram no arquivo.
-          </p>
-          <a class="btn btn-outline btn-block" id="export-btn" href="/api/export">Exportar tudo (.zip)</a>
-          <input id="import-file" class="field" type="file" accept=".zip,application/zip" />
-          <button class="btn btn-outline btn-block" id="import-btn">Importar backup</button>
-          <p class="error-msg is-hidden" id="backup-error"></p>
-        </div>
+        <!-- ==================== STAGE 2: CHARACTER SHEET ==================== -->
+        <section class="stage-panel is-hidden" id="stage-2" data-stage="2">
+          <div class="stage-head">
+            <div class="stage-head-left">
+              <div class="stage-title-row">
+                <span class="stage-big-num">2.</span>
+                <h1>Personagens e folhas de referência</h1>
+              </div>
+              <p class="hint">
+                Cadastre os personagens do livro e gere o Character Sheet no traço selecionado.
+              </p>
+            </div>
+            <div class="topbar-actions" id="global-import-wrap">
+              <select id="global-char-select" class="field" style="width: auto; min-width: 210px;">
+                <option value="">Importar da biblioteca…</option>
+              </select>
+              <button class="btn btn-outline btn-sm" id="global-char-import" type="button">Importar</button>
+            </div>
+          </div>
 
-        <div class="panel-block panel-note">
-          <h2>Como funciona</h2>
-          <ol class="steps">
-            <li>Defina os padrões e ajuste o título de cada página.</li>
-            <li>Gere as imagens uma a uma (ou todas as pendentes).</li>
-            <li>Revise a lista e gere o PDF pronto para impressão.</li>
-          </ol>
-        </div>
-      </aside>
+          <div class="stage-split">
+            <div class="floating-card">
+              <h3>Elenco do livro</h3>
+              <div class="char-grid" id="book-char-grid"></div>
+              <div class="empty-state is-hidden" id="book-char-empty">
+                <p>Nenhum personagem cadastrado neste livro.</p>
+              </div>
+            </div>
 
-      <section class="pages-section">
-        <div class="section-head">
+            <div class="floating-card">
+              <h3>Novo personagem</h3>
+              <label class="field-label">
+                <span>Nome</span>
+                <input id="char-name" class="field" type="text" placeholder="Ex: Barnaby" />
+              </label>
+              <label class="field-label">
+                <span>Aparência e roupa</span>
+                <textarea id="char-desc" class="field" rows="4" placeholder="Ex: Ursinho rechonchudo com cachecol listrado e macacão"></textarea>
+              </label>
+              <label class="field-label">
+                <span>Imagem base (opcional)</span>
+                <input id="char-file" class="field" style="padding: 7px 10px; font-size: 0.82rem;" type="file" accept="image/*" />
+              </label>
+              <button class="btn btn-primary btn-block btn-sm" id="char-add-btn" type="button">Adicionar personagem</button>
+              <p class="error-msg is-hidden" id="char-error"></p>
+            </div>
+          </div>
+
+          <div class="stage-footer">
+            <button class="btn btn-outline btn-sm" type="button" data-goto-step="1">Voltar para estilo</button>
+            <button class="btn btn-primary btn-sm" type="button" data-goto-step="3">Ir para roteiro</button>
+          </div>
+        </section>
+
+        <!-- ==================== STAGE 3: HISTÓRIA & ROTEIRO ==================== -->
+        <section class="stage-panel is-hidden" id="stage-3" data-stage="3">
+          <div class="stage-head">
+            <div class="stage-head-left">
+              <div class="stage-title-row">
+                <span class="stage-big-num">3.</span>
+                <h1>Roteiro e divisão em páginas</h1>
+              </div>
+              <p class="hint">
+                Crie uma história contínua ou uma coleção temática com prompts, textos e personagens por página.
+              </p>
+            </div>
+            <div class="mode-pills" role="group" aria-label="Modo do roteiro">
+              <button class="mode-pill is-active" type="button" data-story-mode="narrative">Arco narrativo</button>
+              <button class="mode-pill" type="button" data-story-mode="collection">Coleção temática</button>
+            </div>
+          </div>
+
+          <div class="stage-split">
+            <div class="floating-card">
+              <h3>Gerar roteiro</h3>
+              <label class="field-label">
+                <span>Premissa ou tema</span>
+                <textarea id="story-premise" class="field" rows="3" placeholder="Ex: Um dia chuvoso em que Barnaby prepara chá, assa biscoitos e monta uma cabana."></textarea>
+              </label>
+
+              <div class="field-row">
+                <label class="field-label">
+                  <span>Páginas</span>
+                  <input id="story-pages" class="field" type="number" min="1" max="200" value="12" />
+                </label>
+                <label class="field-label">
+                  <span>Idioma</span>
+                  <select id="story-language" class="field">
+                    <option value="en" selected>English</option>
+                    <option value="pt-BR">Português (BR)</option>
+                    <option value="es">Español</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="topbar-actions">
+                <button class="btn btn-accent btn-sm" id="story-generate-btn" type="button">Gerar roteiro</button>
+                <button class="btn btn-outline btn-sm" id="story-save-btn" type="button">Salvar sinopse</button>
+              </div>
+              <p class="error-msg is-hidden" id="story-error"></p>
+
+              <label class="field-label">
+                <span>Sinopse</span>
+                <textarea id="story-synopsis" class="field" rows="3" placeholder="Resumo do livro"></textarea>
+              </label>
+            </div>
+
+            <div class="floating-card">
+              <h3>Texto nas páginas</h3>
+              <label class="check-toggle">
+                <input type="checkbox" id="caption-enabled" />
+                <span>Exibir legenda ou balão de fala</span>
+              </label>
+              <div id="caption-options" style="display: flex; flex-direction: column; gap: 12px;">
+                <div class="field-row">
+                  <label class="field-label">
+                    <span>Estilo</span>
+                    <select id="caption-style" class="field">
+                      <option value="balloon">Balão de fala</option>
+                      <option value="caption">Legenda</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    <span>Posição</span>
+                    <select id="caption-position" class="field">
+                      <option value="bottom">Base</option>
+                      <option value="top">Topo</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="field-row">
+                  <label class="field-label">
+                    <span>Fonte</span>
+                    <select id="caption-font" class="field">
+                      <option value="sans">Sans</option>
+                      <option value="serif">Serif</option>
+                      <option value="mono">Mono</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    <span>Peso</span>
+                    <select id="caption-weight" class="field">
+                      <option value="normal">Normal</option>
+                      <option value="bold">Negrito</option>
+                    </select>
+                  </label>
+                  <label class="field-label">
+                    <span>Tamanho</span>
+                    <select id="caption-size" class="field">
+                      <option value="0.024">Pequeno</option>
+                      <option value="0.032">Médio</option>
+                      <option value="0.04">Grande</option>
+                      <option value="0.048">Extra</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <div>
-            <h2>Páginas</h2>
-            <p class="hint" id="pages-subtitle">Carregando…</p>
+            <div class="section-header" style="margin-bottom: 12px;">
+              <div>
+                <h2 style="font-size: 1.12rem;">Cenas por página</h2>
+                <p class="hint" style="font-size: 0.84rem;">Edite o prompt, o texto e os personagens de cada página antes de gerar.</p>
+              </div>
+            </div>
+            <ul class="script-list" id="script-list"></ul>
           </div>
-          <div class="section-actions">
-            <span class="progress-pill" id="progress-pill">0 / 0</span>
-            <button class="btn btn-outline" id="generate-pending">Gerar pendentes</button>
-          </div>
-        </div>
-        <ul class="page-list" id="page-list"></ul>
-        <div class="empty-state is-hidden" id="empty-state">
-          <p>Crie uma sessão para começar.</p>
-        </div>
-      </section>
-    </main>
 
-    <div class="busy-overlay is-hidden" id="busy-overlay" role="status" aria-live="polite">
-      <div class="busy-card">
-        <div class="spinner busy-spinner"></div>
-        <h3 id="busy-title">Importando backup…</h3>
-        <div class="busy-bar" id="busy-bar"><div class="busy-fill" id="busy-fill"></div></div>
-        <p class="busy-sub" id="busy-sub">Não feche esta página.</p>
+          <div class="stage-footer">
+            <button class="btn btn-outline btn-sm" type="button" data-goto-step="2">Voltar para personagens</button>
+            <button class="btn btn-primary btn-sm" type="button" data-goto-step="4">Ir para páginas e PDF</button>
+          </div>
+        </section>
+
+        <!-- ==================== STAGE 4: PÁGINAS & PDF KDP ==================== -->
+        <section class="stage-panel is-hidden" id="stage-4" data-stage="4">
+          <div class="stage-head">
+            <div class="stage-head-left">
+              <div class="stage-title-row">
+                <span class="stage-big-num">4.</span>
+                <h1>Páginas e PDF</h1>
+              </div>
+              <p class="hint" id="pages-subtitle">
+                Gere páginas individualmente ou em fila usando o estilo e os personagens aprovados.
+              </p>
+            </div>
+            <div class="topbar-actions">
+              <span class="pill" id="progress-pill">0 / 0 prontas</span>
+              <button class="btn btn-accent btn-sm" id="generate-pending" type="button">Gerar pendentes</button>
+            </div>
+          </div>
+
+          <div class="kdp-bar">
+            <div class="kdp-toggles">
+              <label class="check-toggle">
+                <input type="checkbox" id="kdp-blank-verso" />
+                <span>Verso em branco</span>
+              </label>
+              <label class="check-toggle">
+                <input type="checkbox" id="kdp-title-page" />
+                <span>Folha de rosto</span>
+              </label>
+              <label class="check-toggle">
+                <input type="checkbox" id="kdp-belongs-to" />
+                <span>"Este livro pertence a"</span>
+              </label>
+              <label class="check-toggle">
+                <input type="checkbox" id="kdp-color-test" />
+                <span>Teste de cores</span>
+              </label>
+            </div>
+            <div class="topbar-actions">
+              <button class="btn btn-primary btn-sm" id="compose-btn-stage" type="button" disabled>Gerar PDF</button>
+              <a class="btn btn-outline btn-sm is-hidden" id="pdf-link-stage" href="#" target="_blank" rel="noopener">Abrir PDF</a>
+            </div>
+          </div>
+
+          <ul class="page-list" id="page-list"></ul>
+
+          <div class="stage-footer">
+            <button class="btn btn-outline btn-sm" type="button" data-goto-step="3">Voltar para roteiro</button>
+            <a class="btn btn-outline btn-sm" href="/">Voltar para biblioteca</a>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Save Custom Preset Modal -->
+    <div class="modal-backdrop is-hidden" id="preset-modal" role="dialog" aria-modal="true" aria-label="Salvar preset personalizado">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3>Salvar preset personalizado</h3>
+          <button class="btn btn-ghost btn-sm" id="preset-modal-close" type="button">Fechar</button>
+        </div>
+        <p class="hint">Salve as regras atuais de traço, formato KDP e binarização deste livro para reutilizar em futuros projetos.</p>
+        <label class="field-label">
+          <span>Nome do preset</span>
+          <input id="custom-preset-name" class="field" type="text" placeholder="Ex: Cozy Gatos 8.5x8.5" />
+        </label>
+        <label class="field-label">
+          <span>Descrição curta</span>
+          <input id="custom-preset-tagline" class="field" type="text" placeholder="Ex: Traço grosso fofo com cenários de cafeteria" />
+        </label>
+        <button class="btn btn-primary btn-block" id="custom-preset-save" type="button">Salvar preset</button>
       </div>
     </div>
 
-    <div class="lightbox is-hidden" id="lightbox" role="dialog" aria-modal="true" aria-label="Visualizar página">
+    <!-- ChatGPT Plus Auth Modal -->
+    <div class="modal-backdrop is-hidden" id="auth-modal" role="dialog" aria-modal="true" aria-label="Conta ChatGPT Plus">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h3>Conta ChatGPT Plus / Codex</h3>
+          <button class="btn btn-ghost btn-sm" id="auth-modal-close" type="button">Fechar</button>
+        </div>
+        <p class="hint">Conecte seu plano ChatGPT Plus para gerar roteiros, Character Sheets e páginas via provedor <code>codex</code>.</p>
+        <div class="auth-code-box is-hidden" id="codex-code">
+          <p style="margin: 0; font-size: 0.85rem;">
+            Abra <a id="codex-link" href="https://auth.openai.com/codex/device" target="_blank" rel="noopener">auth.openai.com/codex/device</a> e digite o código:
+          </p>
+          <code id="codex-user-code"></code>
+        </div>
+        <p class="error-msg is-hidden" id="codex-error"></p>
+        <button class="btn btn-primary btn-block" id="codex-connect" type="button">Conectar ChatGPT</button>
+        <button class="btn btn-outline btn-block is-hidden" id="codex-logout" type="button">Desconectar conta</button>
+      </div>
+    </div>
+
+    <!-- Lightbox -->
+    <div class="lightbox is-hidden" id="lightbox" role="dialog" aria-modal="true" aria-label="Visualizar imagem">
       <button class="lightbox-close" id="lightbox-close" aria-label="Fechar">×</button>
-      <button class="lightbox-nav prev" id="lightbox-prev" aria-label="Página anterior">‹</button>
+      <button class="lightbox-nav prev" id="lightbox-prev" aria-label="Anterior">‹</button>
       <img id="lightbox-img" alt="" />
-      <button class="lightbox-nav next" id="lightbox-next" aria-label="Próxima página">›</button>
+      <button class="lightbox-nav next" id="lightbox-next" aria-label="Próxima">›</button>
       <div class="lightbox-caption" id="lightbox-caption"></div>
     </div>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/static/app.js" defer></script>
+    <script type="module" src="/static/app.js"></script>
   </body>
 </html>
