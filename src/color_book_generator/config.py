@@ -31,12 +31,15 @@ class ProcessingConfig(BaseModel):
     max_upscale: float = Field(default=2.0, ge=1.0, le=4.0)
 
 
-PageSizeName = Literal["letter_8.5x11", "a4", "square_8x8", "6x9", "8x10"]
+PageSizeName = Literal[
+    "letter_8.5x11", "a4", "square_8x8", "square_8.5x8.5", "6x9", "8x10"
+]
 
 PAGE_SIZES_IN: dict[str, tuple[float, float]] = {
     "letter_8.5x11": (8.5, 11.0),
     "a4": (8.27, 11.69),
     "square_8x8": (8.0, 8.0),
+    "square_8.5x8.5": (8.5, 8.5),
     "6x9": (6.0, 9.0),
     "8x10": (8.0, 10.0),
 }
@@ -64,6 +67,8 @@ class BookConfig(BaseModel):
 
     pages: int = Field(default=24, ge=1, le=500)
     include_title_page: bool = True
+    include_belongs_to_page: bool = False
+    include_color_test_page: bool = False
     blank_verso: bool = False
     provider: str = "openai"
     model: str = "gpt-image-1"

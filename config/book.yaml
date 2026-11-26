@@ -1,8 +1,8 @@
 # Coloring book definition. Edit and run: cbg generate
 title: "Meu Livro de Colorir"
 subtitle: ""
-author: "Seu Nome"
-language: pt-BR
+author: ""
+language: en
 
 # Print preset: letter_8.5x11 | a4 | square_8x8 | 6x9 | 8x10
 page_size: letter_8.5x11
@@ -11,8 +11,8 @@ margin_inner_in: 0.75
 margin_outer_in: 0.5
 margin_top_in: 0.5
 margin_bottom_in: 0.5
-# Bleed added around the trim size (0.125 is standard for KDP)
-bleed_in: 0.125
+# Bleed added around the trim size. 0 keeps every PDF page exactly at the chosen format.
+bleed_in: 0
 dpi: 300
 
 # What the book is about
