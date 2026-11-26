@@ -1211,7 +1211,7 @@ async function pollAutopilot() {
     const st = await api(`/api/sessions/${state.sid}/autopilot`);
     renderAutopilot(st);
     if (st.status === "running") {
-      if (st.phase !== state.lastAutopilotPhase || st.phase === "pages" || st.phase === "sheets") {
+      if (st.phase !== state.lastAutopilotPhase || ["pages", "sheets", "finishing", "cover"].includes(st.phase)) {
         state.lastAutopilotPhase = st.phase;
         await reloadSession();
       }
@@ -1234,7 +1234,7 @@ async function pollAutopilot() {
   } catch (_) {}
 }
 
-async function triggerAutopilot(stopAfter, { resume = false } = {}) {
+async function triggerAutopilot(stopAfter, { resume = false, redoFinishing = false } = {}) {
   try {
     const saved = await saveStyleConfig({ silent: true });
     if (!saved) return;
@@ -1246,6 +1246,7 @@ async function triggerAutopilot(stopAfter, { resume = false } = {}) {
         language: $("#story-language")?.value || state.session.language || "en",
         stop_after: stopAfter,
         resume,
+        redo_finishing: redoFinishing,
       }),
     });
     renderAutopilot(st);
@@ -1253,7 +1254,9 @@ async function triggerAutopilot(stopAfter, { resume = false } = {}) {
       state.autopilotTimer = setInterval(pollAutopilot, 1800);
     }
     toast(
-      resume
+      redoFinishing
+        ? "Finalizando o livro: título, capa e páginas finais…"
+        : resume
         ? "Retomando geração de onde parou…"
         : "Geração automática iniciada. Acompanhe o progresso acima."
     );
@@ -1780,6 +1783,9 @@ function bindEvents() {
       toast(err.message, true);
     }
   };
+  $("#auto-extra-btn").addEventListener("click", () =>
+    triggerAutopilot("pdf", { resume: true, redoFinishing: true })
+  );
 
   $("#publisher-logo-upload").addEventListener("click", async () => {
     const file = $("#publisher-logo-file").files[0];

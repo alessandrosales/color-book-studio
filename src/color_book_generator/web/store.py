@@ -124,6 +124,7 @@ class ExtraPage(BaseModel):
     illustration_position: Literal["background", "above", "below", "none"] = "background"
     illustration_size: Literal["small", "medium", "large"] = "small"
     include_in_pdf: bool = True
+    auto: bool = False
     status: PageStatus = "pending"
     error: str | None = None
     updated_at: datetime | None = None

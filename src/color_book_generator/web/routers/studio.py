@@ -39,11 +39,14 @@ from color_book_generator.prompts import compose_page_prompt, effective_negative
 from color_book_generator.providers import get_provider
 from color_book_generator.providers.base import generate_matching
 from color_book_generator.story import (
+    BookFinishing,
     CharacterBrief,
+    ExtraPageCopy,
     ScriptedPage,
     StoryGenerationError,
     StoryMode,
     build_character_sheet_prompt,
+    generate_book_finishing,
     generate_bridge_page,
     generate_full_book_blueprint,
     generate_story_plan,
@@ -506,17 +509,30 @@ def get_cover(sid: str) -> CoverView:
     return _cover_view(state)
 
 
-@router.post("/cover/generate", response_model=CoverView)
-async def generate_cover(sid: str, body: CoverGenerateRequest) -> CoverView:
-    state = _session(sid)
+def _model_for(provider_name: str, model_name: str) -> str:
+    return normalize_codex_model(model_name) if provider_name == "codex" else model_name
+
+
+def _character_refs(state: SessionState) -> list[tuple[str, bytes]]:
+    refs: list[tuple[str, bytes]] = []
+    for character in state.characters:
+        path = store.session_characters_dir(state.id) / character.filename
+        if path.exists():
+            refs.append((character.name, path.read_bytes()))
+    return refs
+
+
+async def _render_cover(
+    state: SessionState,
+    title: str,
+    direction: str,
+    color: bool,
+    provider_name: str,
+    model_name: str,
+) -> None:
+    """Generate and save the cover; on failure mark it as error and re-raise."""
     cfg = _config()
-    provider_name = body.provider or state.provider
-    model_name = body.model or state.model
-    if provider_name == "codex":
-        model_name = normalize_codex_model(model_name)
-    title = body.title if body.title is not None else state.cover_title or state.title
-    direction = body.prompt if body.prompt is not None else state.cover_prompt
-    color = body.color if body.color is not None else state.cover_color
+    sid = state.id
     state.cover_title = title.strip()
     state.cover_prompt = direction.strip()
     state.cover_color = color
@@ -529,12 +545,10 @@ async def generate_cover(sid: str, body: CoverGenerateRequest) -> CoverView:
     )
     processing = state.processing or cfg.processing
     caption = _session_caption_cfg(state)
-    style_bytes = store.load_session_style_bytes(sid)
-    refs: list[tuple[str, bytes]] = []
-    for character in state.characters:
-        path = store.session_characters_dir(sid) / character.filename
-        if path.exists():
-            refs.append((character.name, path.read_bytes()))
+    style_bytes = store.effective_style_reference_bytes(
+        sid, state.category, 1, preset_id=state.preset_id
+    )
+    refs = _character_refs(state)
 
     def _run() -> Image.Image:
         provider = get_provider(provider_name, model_name)
@@ -561,7 +575,7 @@ async def generate_cover(sid: str, body: CoverGenerateRequest) -> CoverView:
         state.cover_status = "error"
         state.cover_error = str(exc)
         store.save_session(state)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise
 
     store.cover_dir(sid).mkdir(parents=True, exist_ok=True)
     cover.save(store.cover_path(sid), "PNG", dpi=(cfg.dpi, cfg.dpi))
@@ -570,6 +584,20 @@ async def generate_cover(sid: str, body: CoverGenerateRequest) -> CoverView:
     state.cover_updated_at = datetime.now()
     state.pdf_ready = False
     store.save_session(state)
+
+
+@router.post("/cover/generate", response_model=CoverView)
+async def generate_cover(sid: str, body: CoverGenerateRequest) -> CoverView:
+    state = _session(sid)
+    provider_name = body.provider or state.provider
+    model_name = _model_for(provider_name, body.model or state.model)
+    title = body.title if body.title is not None else state.cover_title or state.title
+    direction = body.prompt if body.prompt is not None else state.cover_prompt
+    color = body.color if body.color is not None else state.cover_color
+    try:
+        await _render_cover(state, title, direction, color, provider_name, model_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _cover_view(state)
 
 
@@ -692,33 +720,143 @@ def update_extra_page(
     return _extra_page_view(sid, page)
 
 
+_AUTO_EXTRA_PROMPTS = {
+    "front": (
+        "Página de introdução com texto centralizado horizontal e verticalmente, sem bordas, "
+        "com uma pequena ilustração de {subject} acima do texto. Fundo branco, margens "
+        "generosas, tipografia infantil legível, estilo line art do livro. Deixe bastante "
+        "espaço livre para o texto e não inclua texto na ilustração."
+    ),
+    "back": (
+        "Organize a página como um único bloco centralizado verticalmente na página: texto "
+        "centralizado horizontal e verticalmente, sem bordas, com uma pequena ilustração de "
+        "{subject} logo acima do texto e bem próxima dele, com pouco espaço entre a imagem e "
+        "o texto. Margens generosas e fundo branco. Não inclua texto na ilustração."
+    ),
+}
+
+
+def _auto_extra_target(
+    state: SessionState, placement: Literal["front", "back"]
+) -> ExtraPage:
+    """Reuse this book's auto page or an empty placeholder; otherwise create a new page."""
+    collection = (
+        state.front_extra_pages if placement == "front" else state.back_extra_pages
+    )
+    for page in collection:
+        if page.auto:
+            return page
+    for page in collection:
+        if not page.text.strip() and not store.extra_page_background_path(
+            state.id, page.id
+        ).exists():
+            return page
+    page = ExtraPage(id=store.new_extra_page_id(), placement=placement)
+    collection.append(page)
+    return page
+
+
+def _apply_auto_copy(state: SessionState, copy: ExtraPageCopy, fallback: str) -> ExtraPage:
+    placement: Literal["front", "back"] = "front" if copy.placement == "front" else "back"
+    page = _auto_extra_target(state, placement)
+    subject = copy.illustration or fallback
+    page.auto = True
+    page.title = copy.title
+    page.text = copy.text
+    page.prompt = _AUTO_EXTRA_PROMPTS[placement].format(subject=subject)
+    page.text_align = "center"
+    page.text_vertical = "center"
+    page.show_border = False
+    page.illustration_position = "above"
+    page.illustration_size = "small"
+    page.include_in_pdf = True
+    _render_extra_page(state, page)
+    return page
+
+
+def _finishing_inputs(state: SessionState) -> dict[str, object]:
+    """Whole-book context handed to the LLM that writes the book's frame."""
+    preset = (
+        get_preset(state.preset_id, store.load_custom_presets())
+        if state.preset_id
+        else None
+    )
+    char_name_by_id = {c.id: c.name for c in state.characters}
+    scripted = [
+        ScriptedPage(
+            index=page.index,
+            title=page.title,
+            scene_prompt=page.prompt,
+            caption_text=page.caption_text,
+            character_names=[
+                char_name_by_id[cid] for cid in page.character_ids if cid in char_name_by_id
+            ],
+        )
+        for page in sorted(state.pages, key=lambda item: item.index)
+    ]
+    return {
+        "book_title": state.title,
+        "author": state.author,
+        "premise": state.story_premise,
+        "synopsis": state.story_synopsis,
+        "language": state.language or "en",
+        "preset": preset,
+        "style_context": state.context_prompt,
+        "characters": [
+            CharacterBrief(id=c.id, name=c.name, description=c.description)
+            for c in state.characters
+        ],
+        "pages": scripted,
+        "provider": state.provider,
+        "model": state.model,
+    }
+
+
+def _apply_frame_pages(state: SessionState, finishing: BookFinishing) -> list[ExtraPage]:
+    hero = state.characters[0].name if state.characters else "the main character"
+    fallback = f"{hero} smiling"
+    return [
+        _apply_auto_copy(state, copy, fallback)
+        for copy in (finishing.front, finishing.back)
+    ]
+
+
+class AutoExtraPagesResponse(BaseModel):
+    pages: list[ExtraPageView]
+
+
+@router.post("/extra-pages/auto", response_model=AutoExtraPagesResponse)
+async def auto_extra_pages(sid: str) -> AutoExtraPagesResponse:
+    """Write the welcome and closing pages from the whole book (title, story, cast, style)."""
+    state = _session(sid)
+    try:
+        finishing = await asyncio.to_thread(
+            generate_book_finishing, **_finishing_inputs(state)
+        )
+    except StoryGenerationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    state = _session(sid)
+    pages = _apply_frame_pages(state, finishing)
+    state.pdf_ready = False
+    store.save_session(state)
+    return AutoExtraPagesResponse(pages=[_extra_page_view(sid, page) for page in pages])
+
+
 class ExtraPageVisualRequest(BaseModel):
     provider: str | None = None
     model: str | None = None
 
 
-@router.post("/extra-pages/{page_id}/visual", response_model=ExtraPageView)
-async def generate_extra_page_visual(
-    sid: str, page_id: str, body: ExtraPageVisualRequest
-) -> ExtraPageView:
-    state = _session(sid)
-    page, _collection = _find_extra_page(state, page_id)
-    if not page.prompt.strip():
-        raise HTTPException(
-            status_code=400, detail="informe um prompt para gerar esta pagina"
-        )
+async def _render_extra_visual(
+    state: SessionState, page: ExtraPage, provider_name: str, model_name: str
+) -> None:
+    """Lay out and illustrate one text page; on failure mark it as error and re-raise."""
+    sid = state.id
     cfg = _config()
-    provider_name = body.provider or state.provider
-    model_name = body.model or state.model
-    if provider_name == "codex":
-        model_name = normalize_codex_model(model_name)
     processing = state.processing or cfg.processing
     style_bytes = store.load_session_style_bytes(sid)
-    refs: list[tuple[str, bytes]] = []
-    for character in state.characters:
-        path = store.session_characters_dir(sid) / character.filename
-        if path.exists():
-            refs.append((character.name, path.read_bytes()))
+    refs = _character_refs(state)
 
     page.status = "generating"
     page.error = None
@@ -736,7 +874,7 @@ async def generate_extra_page_visual(
         page.status = "error"
         page.error = f"nao foi possivel interpretar o prompt da pagina: {exc}"
         store.save_session(state)
-        raise HTTPException(status_code=400, detail=page.error) from exc
+        raise ValueError(page.error) from exc
 
     page.text_align = layout.text_align
     page.text_vertical = layout.text_vertical
@@ -750,7 +888,7 @@ async def generate_extra_page_visual(
         _render_extra_page(state, page)
         state.pdf_ready = False
         store.save_session(state)
-        return _extra_page_view(sid, page)
+        return
 
     art_subject = layout.image_prompt.strip() or page.prompt.strip()
     art_instruction = (
@@ -793,13 +931,31 @@ async def generate_extra_page_visual(
         page.status = "error"
         page.error = str(exc)
         store.save_session(state)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise
 
     background_path.parent.mkdir(parents=True, exist_ok=True)
     background.save(background_path, "PNG", dpi=(cfg.dpi, cfg.dpi))
     _render_extra_page(state, page)
     state.pdf_ready = False
     store.save_session(state)
+
+
+@router.post("/extra-pages/{page_id}/visual", response_model=ExtraPageView)
+async def generate_extra_page_visual(
+    sid: str, page_id: str, body: ExtraPageVisualRequest
+) -> ExtraPageView:
+    state = _session(sid)
+    page, _collection = _find_extra_page(state, page_id)
+    if not page.prompt.strip():
+        raise HTTPException(
+            status_code=400, detail="informe um prompt para gerar esta pagina"
+        )
+    provider_name = body.provider or state.provider
+    model_name = _model_for(provider_name, body.model or state.model)
+    try:
+        await _render_extra_visual(state, page, provider_name, model_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _extra_page_view(sid, page)
 
 
@@ -1292,6 +1448,8 @@ class AutopilotRequest(BaseModel):
     mode: StoryMode | None = None
     stop_after: Literal["blueprint", "sheets", "pdf"] = "pdf"
     resume: bool = False
+    # Regenerate title, synopsis, cover and frame pages even when they already exist.
+    redo_finishing: bool = False
 
 
 class AutopilotStatus(BaseModel):
@@ -1341,6 +1499,7 @@ def _has_existing_blueprint(state: SessionState) -> bool:
     )
 
 
+_FINISHING_STEPS = 4  # frame texts, cover, welcome page art, closing page art
 
 
 def _reset_stuck_generating(state: SessionState) -> bool:
@@ -1553,7 +1712,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
 
         cfg = _session_book_cfg(state)
         total_img_steps = 1 + len(state.characters) + (
-            0 if req.stop_after == "sheets" else len(state.pages)
+            0 if req.stop_after == "sheets" else len(state.pages) + _FINISHING_STEPS
         )
         done_img_steps = 0
 
@@ -1775,8 +1934,105 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             page.updated_at = datetime.now()
             store.save_session(state)
             done_img_steps += 1
+            if _is_cancelled():
+                _finish_cancelled("pages", _pct(), 3)
+                return
+
+        # Phase 5: Book frame — read the finished pages, then write a coherent title,
+        # synopsis and cover direction, paint the cover and illustrate the welcome and
+        # closing pages. A failure here is reported but still lets the PDF be composed.
+        finishing_errors: list[str] = []
+        keep_finished = req.resume and not req.redo_finishing
+        auto_pages = [
+            p for p in (*state.front_extra_pages, *state.back_extra_pages) if p.auto
+        ]
+        if not (keep_finished and len(auto_pages) >= 2):
+            if _is_cancelled():
+                _finish_cancelled("finishing", _pct(), 4)
+                return
+            _set_autopilot(
+                sid,
+                status="running",
+                phase="finishing",
+                label="Lendo o livro pronto para criar título, sinopse e páginas finais…",
+                percent=_pct(),
+                current_step=4,
+            )
+            try:
+                finishing = await asyncio.to_thread(
+                    generate_book_finishing, **_finishing_inputs(state)
+                )
+            except StoryGenerationError as exc:
+                finishing_errors.append(f"textos finais: {exc}")
+            else:
+                if finishing.title:
+                    state.title = finishing.title
+                    state.cover_title = finishing.title
+                if finishing.synopsis:
+                    state.story_synopsis = finishing.synopsis
+                if finishing.cover_prompt:
+                    state.cover_prompt = finishing.cover_prompt
+                _apply_frame_pages(state, finishing)
+                state.current_step = 4
+                store.save_session(state)
+        done_img_steps += 1
+
+        cover_ready = state.cover_status == "done" and store.cover_path(sid).exists()
+        if state.cover_include and not (keep_finished and cover_ready):
+            if _is_cancelled():
+                _finish_cancelled("cover", _pct(), 4)
+                return
+            _set_autopilot(
+                sid,
+                status="running",
+                phase="cover",
+                label="Criando a capa…",
+                percent=_pct(),
+                current_step=4,
+            )
+            try:
+                await _render_cover(
+                    state,
+                    state.cover_title or state.title,
+                    state.cover_prompt,
+                    state.cover_color,
+                    provider_name,
+                    model_name,
+                )
+            except Exception as exc:
+                finishing_errors.append(f"capa: {exc}")
+        done_img_steps += 1
+
+        frame_pages = [
+            p for p in (*state.front_extra_pages, *state.back_extra_pages) if p.auto
+        ]
+        for frame_page in frame_pages[:2]:
+            if _is_cancelled():
+                _finish_cancelled("finishing", _pct(), 4)
+                return
+            has_art = store.extra_page_background_path(sid, frame_page.id).exists()
+            if keep_finished and has_art and frame_page.status == "done":
+                done_img_steps += 1
+                continue
+            label = "boas-vindas" if frame_page.placement == "front" else "agradecimento"
+            _set_autopilot(
+                sid,
+                status="running",
+                phase="finishing",
+                label=f"Ilustrando a página de {label}…",
+                percent=_pct(),
+                current_step=4,
+            )
+            try:
+                await _render_extra_visual(state, frame_page, provider_name, model_name)
+            except Exception as exc:
+                finishing_errors.append(f"página de {label}: {exc}")
+            done_img_steps += 1
 
         # Phase 5: Compose Final KDP PDF
+        if _is_cancelled():
+            _finish_cancelled("pdf", _pct(), 4)
+            return
         _set_autopilot(
             sid,
             status="running",
@@ -1808,6 +2064,17 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             state.pdf_ready = True
             store.save_session(state)
 
+        if finishing_errors:
+            _set_autopilot(
+                sid,
+                status="error",
+                phase="finishing",
+                label="Livro montado, mas parte da finalização falhou. Continue para tentar de novo.",
+                percent=99,
+                current_step=4,
+                error="; ".join(finishing_errors),
+            )
+            return
         _set_autopilot(
             sid,
             status="done",

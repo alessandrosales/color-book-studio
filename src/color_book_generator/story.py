@@ -640,3 +640,125 @@ def generate_bridge_page(
         character_names=names,
         character_ids=unique_ids,
     )
+
+
+class ExtraPageCopy(BaseModel):
+    placement: str
+    title: str = ""
+    text: str = ""
+    illustration: str = ""
+
+
+class BookFinishing(BaseModel):
+    """Everything the finished book needs around its pages: title, blurb, cover and frame pages."""
+
+    title: str = ""
+    synopsis: str = ""
+    cover_prompt: str = ""
+    front: ExtraPageCopy
+    back: ExtraPageCopy
+
+
+_EXTRA_TEXT_LIMIT = 700
+
+
+def generate_book_finishing(
+    *,
+    book_title: str,
+    author: str = "",
+    premise: str = "",
+    synopsis: str = "",
+    language: str = "en",
+    preset: StylePreset | None = None,
+    style_context: str = "",
+    characters: list[CharacterBrief] | None = None,
+    pages: list[ScriptedPage] | None = None,
+    provider: str = "",
+    model: str | None = None,
+) -> BookFinishing:
+    """Read the finished book and write its title, synopsis, cover direction and frame pages."""
+    cast = characters or []
+    cast_lines = (
+        "\n".join(f"- {c.name}: {c.description or 'main character'}" for c in cast)
+        if cast
+        else "- (no registered characters)"
+    )
+    style_desc = (
+        f"{preset.name} ({preset.tagline})"
+        if preset is not None
+        else (style_context[:240] or "black-and-white coloring book")
+    )
+    page_lines = "\n\n".join(
+        f"Page {p.index}{f' — {p.title}' if p.title else ''}:\n"
+        f"{p.scene_prompt.strip()[:_EXTRA_TEXT_LIMIT]}"
+        + (f"\nCaption: {p.caption_text.strip()}" if p.caption_text.strip() else "")
+        for p in pages or []
+    ) or "(no pages yet)"
+
+    instructions = (
+        "You are a bestselling children's picture-book and KDP coloring-book author and editor. "
+        "Return ONLY valid JSON with no markdown prose outside the JSON object.\n"
+        "JSON schema:\n"
+        "{\n"
+        '  "title": "final book title",\n'
+        '  "synopsis": "back-cover style synopsis",\n'
+        '  "cover_prompt": "cover art direction",\n'
+        '  "front": {"title": "short welcoming title", "text": "welcome text", '
+        '"illustration": "small single line-art subject"},\n'
+        '  "back": {"title": "", "text": "short thank-you text", '
+        '"illustration": "small single line-art subject"}\n'
+        "}"
+    )
+    user_prompt = (
+        f"Working title: {book_title or '(none)'}\n"
+        f"Author: {author.strip() or '(not set)'}\n"
+        f"Language for every title and text: {language}\n"
+        f"Premise: {premise.strip() or '(not set)'}\n"
+        f"Current synopsis: {synopsis.strip() or '(not set)'}\n"
+        f"Visual style: {style_desc}\n"
+        f"Characters:\n{cast_lines}\n\n"
+        f"Finished story pages:\n{page_lines}\n\n"
+        "Task: read the finished pages and write everything that frames this coloring book.\n"
+        "- title: a catchy, coherent title (max 8 words) that fits what actually happens in the "
+        "pages and names the main character when it helps. Keep the working title if it already "
+        "fits well.\n"
+        "- synopsis: 2 to 4 sentences (40 to 80 words) summarising the story as on a back cover, "
+        "without spoiling the final twist.\n"
+        "- cover_prompt: 1 to 3 sentences describing ONE iconic cover scene with the main "
+        "character, taken from the story's most magical moment. No text or lettering.\n"
+        "- front: a welcome page addressed to the young reader/artist (e.g. 'Welcome, Little "
+        "Artist!'). Two short paragraphs, 70 to 120 words total: introduce the main character "
+        "and the world of the story without spoiling the ending, then invite the reader to grab "
+        "their colors and make every page their own.\n"
+        "- back: a warm closing page. Title may be empty. Text of 2 to 12 words, like a heartfelt "
+        "thank-you that echoes the story's lesson.\n"
+        "- illustration: describe ONE small, simple drawing of the main character (use the exact "
+        "name) with a light prop from the story (e.g. smiling under a small rainbow). No text in it.\n"
+        "- Plain text only: no markdown, no quotes or backticks around the text.\n"
+    )
+    raw = _call_text_llm(
+        instructions, user_prompt, preferred_provider=provider, preferred_model=model
+    )
+    data = _extract_json_object(raw)
+
+    def _parse(key: str) -> ExtraPageCopy:
+        block = data.get(key)
+        if not isinstance(block, dict):
+            raise StoryGenerationError("O modelo nao retornou as paginas extras esperadas.")
+        text = str(block.get("text") or "").strip().strip("`").strip()
+        if not text:
+            raise StoryGenerationError("O modelo retornou uma pagina extra sem texto.")
+        return ExtraPageCopy(
+            placement=key,
+            title=str(block.get("title") or "").strip(),
+            text=text,
+            illustration=str(block.get("illustration") or "").strip(),
+        )
+
+    return BookFinishing(
+        title=str(data.get("title") or "").strip().strip('"'),
+        synopsis=str(data.get("synopsis") or "").strip(),
+        cover_prompt=str(data.get("cover_prompt") or "").strip(),
+        front=_parse("front"),
+        back=_parse("back"),
+    )

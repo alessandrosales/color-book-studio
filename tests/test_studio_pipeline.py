@@ -35,6 +35,35 @@ def _png_bytes() -> bytes:
     return buf.getvalue()
 
 
+def _stub_finishing(monkeypatch: pytest.MonkeyPatch, title: str = "The Final Title") -> None:
+    """Replace the book-finishing LLM calls (frame texts and text-page layout)."""
+    from color_book_generator import story as story_mod
+    from color_book_generator.page_layout import PageLayout
+    from color_book_generator.web.routers import studio as studio_mod
+
+    def _finishing(**_kwargs: object) -> story_mod.BookFinishing:
+        return story_mod.BookFinishing(
+            title=title,
+            synopsis="A finished synopsis.",
+            cover_prompt="The hero under a rainbow",
+            front=story_mod.ExtraPageCopy(
+                placement="front", title="Welcome!", text="Grab your colors.",
+                illustration="hero smiling",
+            ),
+            back=story_mod.ExtraPageCopy(placement="back", text="Thank you"),
+        )
+
+    monkeypatch.setattr(studio_mod, "generate_book_finishing", _finishing)
+    monkeypatch.setattr(
+        studio_mod,
+        "plan_page_layout",
+        lambda **_kwargs: PageLayout(
+            text_align="center", text_vertical="center", show_border=False,
+            image_position="above", image_size="small", image_prompt="hero",
+        ),
+    )
+
+
 def test_presets_list_create_apply_and_delete() -> None:
     res = client.get("/api/presets")
     assert res.status_code == 200
@@ -264,6 +293,7 @@ def test_autopilot_generates_entire_book_from_style_only(
         }
     )
     monkeypatch.setattr(story_mod, "_call_text_llm", lambda *_a, **_k: fake_blueprint)
+    _stub_finishing(monkeypatch, title="Milo's Cozy Bakery")
 
     session = client.post(
         "/api/sessions",
@@ -279,7 +309,7 @@ def test_autopilot_generates_entire_book_from_style_only(
 
     # Poll until background task completes
     final_status = None
-    for _ in range(50):
+    for _ in range(200):
         st = client.get(f"/api/sessions/{sid}/autopilot").json()
         if st["status"] in {"done", "error", "cancelled"}:
             final_status = st
@@ -290,7 +320,16 @@ def test_autopilot_generates_entire_book_from_style_only(
     assert final_status["status"] == "done", final_status
 
     book = client.get(f"/api/sessions/{sid}").json()
-    assert book["title"] == "Cozy Bakery Days"
+    # The finishing phase re-reads the finished pages and settles the final title.
+    assert book["title"] == "Milo's Cozy Bakery"
+    assert book["story_synopsis"] == "A finished synopsis."
+    assert book["cover_title"] == "Milo's Cozy Bakery"
+    assert book["cover_preview_url"]
+    assert [p["text"] for p in book["front_extra_pages"]] == ["Grab your colors."]
+    assert [p["text"] for p in book["back_extra_pages"]] == ["Thank you"]
+    for extra in book["front_extra_pages"] + book["back_extra_pages"]:
+        assert extra["status"] == "done"
+        assert store.extra_page_background_path(sid, extra["id"]).exists()
     assert book["style_url"]
     assert len(book["characters"]) == 1
     assert book["characters"][0]["sheet_status"] == "ready"
@@ -782,6 +821,7 @@ def test_autopilot_cancel_and_resume_from_where_it_stopped(
         )
 
     monkeypatch.setattr(studio_mod, "generate_full_book_blueprint", _fake_blueprint)
+    _stub_finishing(monkeypatch)
 
     generated_prompts: list[str] = []
     original_gen = studio_mod.generate_matching
@@ -842,13 +882,92 @@ def test_autopilot_cancel_and_resume_from_where_it_stopped(
     assert status["status"] == "done", status
     assert blueprint_calls == 1  # Blueprint was NOT regenerated!
     resumed_prompts = generated_prompts[prompts_before_resume:]
-    assert len(resumed_prompts) == 2  # Only Page 2 and Page 3!
-    assert "Page 2 of 3." in resumed_prompts[0]
-    assert "Page 3 of 3." in resumed_prompts[1]
+    page_prompts = [p for p in resumed_prompts if " of 3." in p]
+    assert len(page_prompts) == 2  # Only Page 2 and Page 3!
+    assert "Page 2 of 3." in page_prompts[0]
+    assert "Page 3 of 3." in page_prompts[1]
+    assert len(resumed_prompts) == 5  # + cover, welcome art and closing art
+
+    def _run_until_idle(payload: dict[str, object]) -> dict[str, object]:
+        client.post(f"/api/sessions/{sid}/autopilot", json=payload)
+        current: dict[str, object] = {}
+        for _ in range(100):
+            current = client.get(f"/api/sessions/{sid}/autopilot").json()
+            if current["status"] != "running":
+                break
+            time.sleep(0.05)
+        return current
+
+    # Resuming a finished book must not redo the finishing work...
+    done_count = len(generated_prompts)
+    again = _run_until_idle({"pages": 3, "stop_after": "pdf", "resume": True})
+    assert again["status"] == "done", again
+    assert len(generated_prompts) == done_count
+    # ...unless explicitly asked to redo it (cover + two frame pages).
+    redo = _run_until_idle(
+        {"pages": 3, "stop_after": "pdf", "resume": True, "redo_finishing": True}
+    )
+    assert redo["status"] == "done", redo
+    assert len(generated_prompts) == done_count + 3
 
     final_session = client.get(f"/api/sessions/{sid}").json()
     assert [p["status"] for p in final_session["pages"]] == ["done", "done", "done"]
     assert final_session["pdf_ready"] is True
+
+
+def test_auto_extra_pages_use_book_context_and_replace_placeholders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from color_book_generator import story as story_mod
+
+    seen: dict[str, str] = {}
+
+    def _fake_llm(_instructions: str, user_prompt: str, **_kwargs: object) -> str:
+        seen["prompt"] = user_prompt
+        return json.dumps(
+            {
+                "front": {
+                    "title": "Welcome, Little Artist!",
+                    "text": "Meet Lumi, a gentle unicorn. Grab your colors!",
+                    "illustration": "Lumi smiling under a small rainbow",
+                },
+                "back": {"title": "", "text": "Thank you", "illustration": "Lumi waving"},
+            }
+        )
+
+    monkeypatch.setattr(story_mod, "_call_text_llm", _fake_llm)
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    sid = session["id"]
+    state = store.load_session(sid)
+    assert state is not None
+    state.title = "The Unicorn Who Found His Wings"
+    state.story_synopsis = "Lumi discovers he can fly."
+    state.pages[0].prompt = "Lumi lost in the enchanted forest"
+    state.pages[0].caption_text = "Where is my family?"
+    store.save_session(state)
+    placeholder = client.post(
+        f"/api/sessions/{sid}/extra-pages",
+        json={"placement": "front", "title": "Página inicial", "text": ""},
+    ).json()
+
+    res = client.post(f"/api/sessions/{sid}/extra-pages/auto")
+    assert res.status_code == 200, res.text
+    front, back = res.json()["pages"]
+    assert front["id"] == placeholder["id"]
+    assert front["title"] == "Welcome, Little Artist!"
+    assert "Lumi smiling under a small rainbow" in front["prompt"]
+    assert back["placement"] == "back" and back["text"] == "Thank you"
+    for fragment in ("The Unicorn Who Found His Wings", "Lumi discovers he can fly.",
+                     "Lumi lost in the enchanted forest", "Where is my family?"):
+        assert fragment in seen["prompt"]
+
+    again = client.post(f"/api/sessions/{sid}/extra-pages/auto").json()["pages"]
+    assert [p["id"] for p in again] == [front["id"], back["id"]]
+    refreshed = client.get(f"/api/sessions/{sid}").json()
+    assert len(refreshed["front_extra_pages"]) == 1
+    assert len(refreshed["back_extra_pages"]) == 1
 
 
 def test_publisher_logo_upload_and_pdf(tmp_path: Path) -> None:
@@ -890,3 +1009,47 @@ def test_publisher_logo_upload_and_pdf(tmp_path: Path) -> None:
 
     assert client.delete("/api/publisher-logo").status_code == 204
     assert client.get(f"/api/sessions/{sid}").json()["publisher_logo_url"] is None
+
+
+def test_autopilot_finishing_failure_still_composes_pdf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    from color_book_generator import story as story_mod
+    from color_book_generator.web.routers import studio as studio_mod
+
+    _stub_finishing(monkeypatch)
+    monkeypatch.setattr(
+        studio_mod,
+        "generate_full_book_blueprint",
+        lambda **_k: story_mod.FullBookBlueprint(
+            title="Lumi",
+            premise="A unicorn",
+            synopsis="Lumi flies.",
+            style_anchor_subject="Lumi",
+            characters=[story_mod.GeneratedCharacter(name="Lumi", description="unicorn")],
+            pages=[story_mod.ScriptedPage(index=1, scene_prompt="Lumi in a forest")],
+        ),
+    )
+
+    def _boom(**_kwargs: object) -> story_mod.BookFinishing:
+        raise story_mod.StoryGenerationError("sem provedor de texto")
+
+    monkeypatch.setattr(studio_mod, "generate_book_finishing", _boom)
+    sid = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()["id"]
+    client.post(f"/api/sessions/{sid}/autopilot", json={"pages": 1, "stop_after": "pdf"})
+    status: dict[str, object] = {}
+    for _ in range(200):
+        status = client.get(f"/api/sessions/{sid}/autopilot").json()
+        if status["status"] != "running":
+            break
+        time.sleep(0.05)
+
+    assert status["status"] == "error", status
+    assert "textos finais" in str(status["error"])
+    book = client.get(f"/api/sessions/{sid}").json()
+    assert book["pdf_ready"] is True
+    assert book["cover_preview_url"]  # the cover still got painted
