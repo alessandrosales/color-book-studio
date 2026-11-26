@@ -24,7 +24,7 @@ from color_book_generator.config import (
 )
 from color_book_generator.layout.pdf import compose_pdf
 from color_book_generator.page_layout import plan_page_layout
-from color_book_generator.presets import get_preset
+from color_book_generator.presets import default_page_layout_for_category, get_preset
 from color_book_generator.processing.caption import (
     draw_cover_title,
     render_text_page,
@@ -39,9 +39,11 @@ from color_book_generator.providers import get_provider
 from color_book_generator.providers.base import generate_matching
 from color_book_generator.story import (
     CharacterBrief,
+    ScriptedPage,
     StoryGenerationError,
     StoryMode,
     build_character_sheet_prompt,
+    generate_bridge_page,
     generate_full_book_blueprint,
     generate_story_plan,
 )
@@ -284,6 +286,7 @@ def apply_preset(sid: str, body: ApplyPresetRequest) -> dict[str, object]:
     state.preset_id = preset.id
     state.category = preset.category
     state.page_size = preset.page_size
+    state.page_layout = default_page_layout_for_category(preset.category)
     state.context_prompt = preset.context_prompt
     state.negative_prompt = preset.negative_prompt
     state.processing = preset.processing.model_copy(deep=True)
@@ -1165,6 +1168,122 @@ async def generate_story(sid: str, body: StoryGenerateRequest) -> StoryStateView
     )
 
 
+class InsertPageRequest(BaseModel):
+    after_index: int = Field(ge=0, le=200)
+    hint: str = ""
+
+
+class InsertPageResponse(BaseModel):
+    inserted_index: int
+    total_pages: int
+    title: str
+    prompt: str
+    caption_text: str
+    character_ids: list[str]
+
+
+@router.post("/pages/insert", response_model=InsertPageResponse, status_code=201)
+async def insert_contextual_page(
+    sid: str, body: InsertPageRequest
+) -> InsertPageResponse:
+    """Generate a new page bridging the context between after_index and after_index + 1."""
+    state = _session(sid)
+    if len(state.pages) >= 200:
+        raise HTTPException(status_code=400, detail="limite maximo de 200 paginas atingido")
+    if body.after_index < 0 or body.after_index > len(state.pages):
+        raise HTTPException(status_code=400, detail="posicao de insercao invalida")
+    if any(p.index > body.after_index and p.status == "generating" for p in state.pages):
+        raise HTTPException(
+            status_code=409,
+            detail="aguarde a geracao das paginas seguintes terminar antes de inserir",
+        )
+
+    ordered = sorted(state.pages, key=lambda item: item.index)
+    by_idx = {p.index: p for p in ordered}
+    char_name_by_id = {c.id: c.name for c in state.characters}
+
+    def _to_scripted(page: PageState | None) -> ScriptedPage | None:
+        if page is None:
+            return None
+        return ScriptedPage(
+            index=page.index,
+            title=page.title,
+            scene_prompt=page.prompt,
+            caption_text=page.caption_text,
+            character_names=[
+                char_name_by_id[cid] for cid in page.character_ids if cid in char_name_by_id
+            ],
+            character_ids=list(page.character_ids),
+        )
+
+    prev_page = _to_scripted(by_idx.get(body.after_index))
+    next_page = _to_scripted(by_idx.get(body.after_index + 1))
+    preset = (
+        get_preset(state.preset_id, store.load_custom_presets())
+        if state.preset_id
+        else None
+    )
+    briefs = [
+        CharacterBrief(id=c.id, name=c.name, description=c.description)
+        for c in state.characters
+    ]
+    new_index = body.after_index + 1
+    total_after = len(state.pages) + 1
+
+    try:
+        scripted = await asyncio.to_thread(
+            generate_bridge_page,
+            book_title=state.title,
+            premise=state.story_premise,
+            synopsis=state.story_synopsis,
+            mode=state.story_mode,
+            language=state.language or "en",
+            preset=preset,
+            style_context=state.context_prompt,
+            characters=briefs,
+            prev_page=prev_page,
+            next_page=next_page,
+            new_index=new_index,
+            total_after=total_after,
+            hint=body.hint,
+            provider=state.provider,
+            model=state.model,
+        )
+    except StoryGenerationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    fallback_chars = (
+        list(prev_page.character_ids)
+        if prev_page and prev_page.character_ids
+        else [c.id for c in state.characters if c.approved]
+    )
+    char_ids = scripted.character_ids or fallback_chars
+
+    new_page = PageState(
+        index=new_index,
+        title=scripted.title,
+        prompt=scripted.scene_prompt,
+        caption_text=scripted.caption_text,
+        character_ids=char_ids,
+        status="pending",
+    )
+    try:
+        updated = store.insert_page_after(sid, body.after_index, new_page)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return InsertPageResponse(
+        inserted_index=new_page.index,
+        total_pages=len(updated.pages),
+        title=new_page.title,
+        prompt=new_page.prompt,
+        caption_text=new_page.caption_text,
+        character_ids=new_page.character_ids,
+    )
+
+
 # --- 1-Click Full-Book Autopilot (Style -> Blueprint -> Anchor -> Sheets -> Pages -> PDF) ---
 
 
@@ -1245,32 +1364,33 @@ def _session_caption_cfg(state: SessionState) -> CaptionConfig:
 async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
     try:
         state = _session(sid)
-        if req.preset_id:
-            preset = get_preset(req.preset_id, store.load_custom_presets())
-            if preset is not None:
-                state.preset_id = preset.id
-                state.category = preset.category
-                state.page_size = preset.page_size
-                state.context_prompt = preset.context_prompt
-                state.negative_prompt = preset.negative_prompt
-                state.processing = preset.processing.model_copy(deep=True)
-                state.caption_enabled = preset.caption.enabled
-                state.caption_style = preset.caption.style
-                state.caption_position = preset.caption.position
-                state.caption_font_family = preset.caption.font_family
-                state.caption_font_bold = preset.caption.bold
-                state.caption_font_size = preset.caption.font_size_ratio
-                state.blank_verso = preset.blank_verso
-                state.include_title_page = preset.include_title_page
-                state.include_belongs_to_page = preset.include_belongs_to_page
-                state.include_color_test_page = preset.include_color_test_page
-                store.save_session(state)
-        else:
-            preset = (
-                get_preset(state.preset_id, store.load_custom_presets())
-                if state.preset_id
-                else None
-            )
+        effective_preset_id = req.preset_id or state.preset_id
+        preset = (
+            get_preset(effective_preset_id, store.load_custom_presets())
+            if effective_preset_id
+            else None
+        )
+        # Only apply preset defaults when switching to a different preset.
+        # Keep the user's configured style, format, processing and typography
+        # when running autopilot on the already-configured book.
+        if req.preset_id and req.preset_id != state.preset_id and preset is not None:
+            state.preset_id = preset.id
+            state.category = preset.category
+            state.page_size = preset.page_size
+            state.context_prompt = preset.context_prompt
+            state.negative_prompt = preset.negative_prompt
+            state.processing = preset.processing.model_copy(deep=True)
+            state.caption_enabled = preset.caption.enabled
+            state.caption_style = preset.caption.style
+            state.caption_position = preset.caption.position
+            state.caption_font_family = preset.caption.font_family
+            state.caption_font_bold = preset.caption.bold
+            state.caption_font_size = preset.caption.font_size_ratio
+            state.blank_verso = preset.blank_verso
+            state.include_title_page = preset.include_title_page
+            state.include_belongs_to_page = preset.include_belongs_to_page
+            state.include_color_test_page = preset.include_color_test_page
+            store.save_session(state)
 
         target_pages = req.pages or len(state.pages) or 12
         provider_name = state.provider
@@ -1310,8 +1430,6 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
         state.story_premise = blueprint.premise
         state.story_synopsis = blueprint.synopsis
         state.story_mode = blueprint.mode
-        if any(p.caption_text.strip() for p in blueprint.pages):
-            state.caption_enabled = True
 
         # Register generated characters into this book
         char_id_by_name: dict[str, str] = {}
@@ -1401,9 +1519,10 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             )
             return to_line_art(img, cfg.processing)
 
-        anchor_img = await asyncio.to_thread(_gen_anchor)
-        store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
-        anchor_img.save(store.session_style_path(sid), "PNG")
+        if not store.session_style_path(sid).exists():
+            anchor_img = await asyncio.to_thread(_gen_anchor)
+            store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
+            anchor_img.save(store.session_style_path(sid), "PNG")
         done_img_steps += 1
         style_bytes = store.session_style_path(sid).read_bytes()
 
@@ -1469,7 +1588,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
         for page in state.pages:
             if sid in _autopilot_cancel:
                 _set_autopilot(
-                    sid, status="cancelled", phase="pages", label="Autopilot cancelado.", percent=_pct(), current_step=4
+                    sid, status="cancelled", phase="pages", label="Geração automática cancelada.", percent=_pct(), current_step=3
                 )
                 return
             _set_autopilot(
@@ -1478,15 +1597,20 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 phase="pages",
                 label=f"Ilustrando página {page.index} de {len(state.pages)}…",
                 percent=_pct(),
-                current_step=4,
+                current_step=3,
             )
             page.status = "generating"
             page.error = None
-            state.current_step = 4
+            state.current_step = 3
             store.save_session(state)
 
+            effective_layout = state.page_layout or default_page_layout_for_category(state.category)
             full_prompt = compose_page_prompt(
-                state.context_prompt, page.prompt, page.index, len(state.pages)
+                state.context_prompt,
+                page.prompt,
+                page.index,
+                len(state.pages),
+                page_layout=effective_layout,
             )
             char_notes = [
                 f"{char_by_id[cid].name}: {char_by_id[cid].description}"
@@ -1509,15 +1633,20 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 prompt_text: str = full_prompt,
                 page_refs: list[tuple[str, bytes]] = refs,
                 page_caption: str = page.caption_text,
+                page_idx: int = page.index,
             ) -> tuple[Image.Image, Image.Image]:
                 provider = get_provider(provider_name, model_name)
+                effective_style = (
+                    style_bytes
+                    or store.load_page_layout_reference_bytes(state.category, page_idx)
+                )
                 raw_img = generate_matching(
                     provider,
                     prompt_text,
                     target_size=cfg.image_px,
                     negative_prompt=cfg.negative_prompt,
                     references=page_refs or None,
-                    style_reference=style_bytes,
+                    style_reference=effective_style,
                 )
                 proc = prepare_page(
                     raw_img, cfg.image_px, cfg.processing, caption_cfg, page_caption
@@ -1543,11 +1672,11 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             sid,
             status="running",
             phase="pdf",
-            label="Montando PDF KDP final…",
+            label="Montando prévia em PDF…",
             percent=97,
             current_step=4,
         )
-        page_files = sorted(store.pages_dir(sid).glob("page-*.png"))
+        page_files = store.session_page_files(state)
         if page_files:
             cover_path = store.cover_path(sid)
             await asyncio.to_thread(
@@ -1573,9 +1702,9 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             sid,
             status="done",
             phase="done",
-            label="Livro completo gerado com sucesso! PDF KDP pronto.",
+            label="Geração concluída. Prévia em PDF disponível para revisão.",
             percent=100,
-            current_step=5,
+            current_step=4,
         )
     except Exception as exc:
         _set_autopilot(

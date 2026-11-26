@@ -211,8 +211,8 @@ def test_kdp_pdf_extras_and_session_title(tmp_path: Path) -> None:
         include_color_test_page=True,
     )
     reader = PdfReader(str(out))
-    # Title + BelongsTo + ColorTest + Page1: blank versos only sit between illustrations
-    assert len(reader.pages) == 4
+    # Three front pages, alignment page, illustration and its blank verso
+    assert len(reader.pages) == 6
     assert reader.metadata is not None
     assert reader.metadata.title == "Cozy Bear Adventures"
 
@@ -298,6 +298,131 @@ def test_autopilot_generates_entire_book_from_style_only(
     assert all(p["status"] == "done" for p in book["pages"])
     assert book["pdf_ready"] is True
     assert client.get(book["pdf_url"]).content.startswith(b"%PDF")
+
+
+def test_autopilot_preserves_user_stage1_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    from color_book_generator import story as story_mod
+
+    fake_blueprint = json.dumps(
+        {
+            "title": "Custom Configured Book",
+            "premise": "A quiet forest walk",
+            "synopsis": "Short synopsis.",
+            "style_anchor_subject": "Fox under a tree",
+            "characters": [],
+            "pages": [
+                {
+                    "title": "Scene 1",
+                    "prompt": "Fox by a stream",
+                    "caption_text": "Quiet stream.",
+                    "character_names": [],
+                }
+            ],
+        }
+    )
+    monkeypatch.setattr(story_mod, "_call_text_llm", lambda *_a, **_k: fake_blueprint)
+
+    session = client.post(
+        "/api/sessions",
+        json={"pages": 1, "provider": "fake", "model": "fake-1", "preset_id": "bold_easy_cozy"},
+    ).json()
+    sid = session["id"]
+
+    patched = client.patch(
+        f"/api/sessions/{sid}",
+        json={
+            "context_prompt": "My custom line art instructions",
+            "negative_prompt": "no hatching",
+            "page_size": "a4",
+            "processing": {"threshold": "adaptive", "min_component_px": 12, "denoise": False},
+            "caption_enabled": False,
+            "caption_font_family": "serif",
+            "caption_font_bold": True,
+        },
+    )
+    assert patched.status_code == 200, patched.text
+
+    start = client.post(
+        f"/api/sessions/{sid}/autopilot",
+        json={"pages": 1, "stop_after": "blueprint"},
+    )
+    assert start.status_code == 202, start.text
+
+    final_status = None
+    for _ in range(50):
+        st = client.get(f"/api/sessions/{sid}/autopilot").json()
+        if st["status"] in {"done", "error", "cancelled"}:
+            final_status = st
+            break
+        time.sleep(0.05)
+
+    assert final_status is not None and final_status["status"] == "done", final_status
+    book = client.get(f"/api/sessions/{sid}").json()
+    assert book["context_prompt"] == "My custom line art instructions"
+    assert book["negative_prompt"] == "no hatching"
+    assert book["page_size"] == "a4"
+    assert book["processing"]["threshold"] == "adaptive"
+    assert book["processing"]["min_component_px"] == 12
+    assert book["processing"]["denoise"] is False
+    assert book["caption_enabled"] is False
+    assert book["caption_font_family"] == "serif"
+    assert book["caption_font_bold"] is True
+
+
+def test_create_session_accepts_full_initial_configuration_over_preset() -> None:
+    res = client.post(
+        "/api/sessions",
+        json={
+            "title": "Pre-configured Book",
+            "pages": 4,
+            "language": "pt-BR",
+            "preset_id": "bold_easy_cozy",
+            "context_prompt": "Custom style right from new book drawer",
+            "negative_prompt": "no gray, no text",
+            "page_size": "a4",
+            "provider": "fake",
+            "model": "fake-1",
+            "processing": {
+                "threshold": "adaptive",
+                "min_component_px": 15,
+                "denoise": False,
+                "crop_to_content": False,
+            },
+            "blank_verso": True,
+            "include_title_page": False,
+            "include_belongs_to_page": True,
+            "include_color_test_page": True,
+            "caption_enabled": True,
+            "caption_style": "caption",
+            "caption_position": "top",
+            "caption_font_family": "serif",
+            "caption_font_bold": True,
+            "caption_font_size": 0.04,
+        },
+    )
+    assert res.status_code == 201, res.text
+    book = res.json()
+    assert book["context_prompt"] == "Custom style right from new book drawer"
+    assert book["negative_prompt"] == "no gray, no text"
+    assert book["page_size"] == "a4"
+    assert book["processing"]["threshold"] == "adaptive"
+    assert book["processing"]["min_component_px"] == 15
+    assert book["processing"]["denoise"] is False
+    assert book["processing"]["crop_to_content"] is False
+    assert book["blank_verso"] is True
+    assert book["include_title_page"] is False
+    assert book["include_belongs_to_page"] is True
+    assert book["include_color_test_page"] is True
+    assert book["caption_enabled"] is True
+    assert book["caption_style"] == "caption"
+    assert book["caption_position"] == "top"
+    assert book["caption_font_family"] == "serif"
+    assert book["caption_font_bold"] is True
+    assert book["caption_font_size"] == 0.04
 
 
 def test_selective_zip_export_includes_only_chosen_books() -> None:
@@ -453,6 +578,10 @@ def test_extra_text_pages_crud_and_pdf_compose(
 
     store.pages_dir(sid).mkdir(parents=True, exist_ok=True)
     Image.new("L", (400, 500), 255).save(store.pages_dir(sid) / "page-001.png")
+    state = store.load_session(sid)
+    assert state is not None
+    state.pages[0].status = "done"
+    store.save_session(state)
     composed = client.post(f"/api/sessions/{sid}/compose")
     assert composed.status_code == 200, composed.text
     assert composed.json()["pdf_ready"] is True
@@ -537,3 +666,87 @@ def test_plan_page_layout_reads_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     assert layout.image_position == "above"
     assert layout.image_size == "small"
     assert layout.image_prompt == "Lumi"
+
+
+def test_insert_contextual_page_bridges_neighbors_and_shifts_files(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from color_book_generator import story as story_mod
+
+    captured: list[dict[str, object]] = []
+
+    def _fake_llm(instructions: str, user_prompt: str, **_kwargs: object) -> str:
+        captured.append({"instructions": instructions, "user_prompt": user_prompt})
+        return (
+            '{"title":"Ponte no rio","scene_prompt":"Barnaby crossing a wooden footbridge over a gentle stream",'
+            '"caption_text":"Vamos atravessar a ponte!","character_names":["Barnaby"]}'
+        )
+
+    monkeypatch.setattr(story_mod, "_call_text_llm", _fake_llm)
+
+    session = client.post(
+        "/api/sessions",
+        json={"pages": 2, "provider": "fake", "model": "fake-1", "title": "Passeio na Floresta"},
+    ).json()
+    sid = session["id"]
+
+    # Add character Barnaby
+    char_res = client.post(
+        f"/api/sessions/{sid}/characters",
+        data={"name": "Barnaby", "description": "Ursinho de cachecol"},
+    )
+    assert char_res.status_code == 201
+    cid = char_res.json()["id"]
+
+    # Set distinct scenes on page 1 and page 2, and generate page 2 artwork on disk
+    client.patch(
+        f"/api/sessions/{sid}/pages/1",
+        json={"title": "Saída da cabana", "prompt": "Barnaby leaving the cozy cabin", "character_ids": [cid]},
+    )
+    client.patch(
+        f"/api/sessions/{sid}/pages/2",
+        json={"title": "Chegada na clareira", "prompt": "Barnaby having a picnic in the sunny meadow", "character_ids": [cid]},
+    )
+    gen2 = client.post(
+        f"/api/sessions/{sid}/pages/2/generate",
+        json={"prompt": "Barnaby having a picnic in the sunny meadow"},
+    )
+    assert gen2.status_code == 200, gen2.text
+    assert store.page_file(sid, 2).exists()
+    assert (store.raw_dir(sid) / "page-002.png").exists()
+    assert (store.preview_dir(sid) / "page-002.png").exists()
+
+    # Insert contextual page right after page 1 (between page 1 and page 2)
+    inserted = client.post(
+        f"/api/sessions/{sid}/pages/insert",
+        json={"after_index": 1},
+    )
+    assert inserted.status_code == 201, inserted.text
+    body = inserted.json()
+    assert body["inserted_index"] == 2
+    assert body["total_pages"] == 3
+    assert body["title"] == "Ponte no rio"
+    assert body["character_ids"] == [cid]
+
+    # Verify LLM prompt received both previous and next page context
+    assert len(captured) == 1
+    prompt_sent = str(captured[0]["user_prompt"])
+    assert "Barnaby leaving the cozy cabin" in prompt_sent
+    assert "Barnaby having a picnic in the sunny meadow" in prompt_sent
+
+    # Verify page 2's artwork shifted cleanly to page 3 on disk and page 2 is now pending
+    assert not store.page_file(sid, 2).exists()
+    assert store.page_file(sid, 3).exists()
+    assert (store.raw_dir(sid) / "page-003.png").exists()
+    assert (store.preview_dir(sid) / "page-003.png").exists()
+
+    refreshed = client.get(f"/api/sessions/{sid}").json()
+    assert [p["index"] for p in refreshed["pages"]] == [1, 2, 3]
+    assert [p["title"] for p in refreshed["pages"]] == [
+        "Saída da cabana",
+        "Ponte no rio",
+        "Chegada na clareira",
+    ]
+    assert refreshed["pages"][1]["status"] == "pending"
+    assert refreshed["pages"][2]["status"] == "done"
+    assert refreshed["pages"][2]["preview_url"] is not None

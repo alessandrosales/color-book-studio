@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import os
 import re
 import shutil
+import tempfile
 from collections import defaultdict
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -34,9 +38,8 @@ from color_book_generator.config import (
     load_book_config,
 )
 from color_book_generator.layout.pdf import compose_pdf
-from color_book_generator.pipeline import _score
-from color_book_generator.presets import get_preset
-from color_book_generator.processing.line_art import prepare_page
+from color_book_generator.presets import default_page_layout_for_category, get_preset
+from color_book_generator.processing.line_art import prepare_page, score_line_art
 from color_book_generator.prompts import (
     compose_page_prompt,
     default_context_prompt,
@@ -66,11 +69,27 @@ from color_book_generator.web.routers.studio import (
 from color_book_generator.web.store import PageState, SessionState
 
 STATIC_DIR = Path(__file__).parent / "static"
+log = logging.getLogger(__name__)
 SID_RE = re.compile(r"^[a-f0-9]{8,32}$")
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _DEFAULT_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}
 
-app = FastAPI(title="Color Book Studio", docs_url="/api/docs", openapi_url="/api/openapi.json")
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    # A fresh process has no generation in flight: anything still marked
+    # "generating" was interrupted and must become retryable.
+    recovered = await asyncio.to_thread(store.recover_interrupted_sessions)
+    if recovered:
+        log.warning("recovered interrupted generations in: %s", ", ".join(recovered))
+    yield
+
+
+app = FastAPI(
+    title="Color Book Studio",
+    docs_url="/api/docs",
+    openapi_url="/api/openapi.json",
+    lifespan=lifespan,
+)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(presets_router)
 app.include_router(studio_router)
@@ -247,7 +266,9 @@ class SessionCreate(BaseModel):
     preset_id: str | None = None
     category: str | None = None
     page_size: PageSizeName | None = None
+    page_layout: str | None = None
     negative_prompt: str | None = None
+    processing: ProcessingConfig | None = None
     story_mode: StoryMode | None = None
     story_premise: str | None = None
     blank_verso: bool | None = None
@@ -273,6 +294,7 @@ class SessionPatch(BaseModel):
     preset_id: str | None = None
     category: str | None = None
     page_size: PageSizeName | None = None
+    page_layout: str | None = None
     negative_prompt: str | None = None
     processing: ProcessingConfig | None = None
     story_mode: StoryMode | None = None
@@ -357,6 +379,7 @@ class SessionView(BaseModel):
     preset_id: str | None = None
     category: str = "cozy"
     page_size: str = "letter_8.5x11"
+    page_layout: str = "single_full"
     negative_prompt: str = ""
     processing: ProcessingConfig | None = None
     characters: list[BookCharacterView] = Field(default_factory=list)
@@ -454,6 +477,7 @@ def _session_view(state: SessionState) -> SessionView:
         preset_id=state.preset_id,
         category=state.category,
         page_size=state.page_size,
+        page_layout=state.page_layout,
         negative_prompt=state.negative_prompt or cfg.negative_prompt,
         processing=cfg.processing,
         characters=[_book_character_view(state.id, c) for c in state.characters],
@@ -997,12 +1021,20 @@ def create_session(body: SessionCreate) -> SessionView:
         preset_id=preset.id if preset is not None else body.preset_id,
         category=body.category or (preset.category if preset is not None else "cozy"),
         page_size=body.page_size or (preset.page_size if preset is not None else cfg.page_size),
+        page_layout=body.page_layout
+        or default_page_layout_for_category(
+            body.category or (preset.category if preset is not None else "cozy")
+        ),
         negative_prompt=(
             body.negative_prompt
             if body.negative_prompt is not None
             else (preset.negative_prompt if preset is not None else cfg.negative_prompt)
         ),
-        processing=preset.processing.model_copy(deep=True) if preset is not None else None,
+        processing=(
+            body.processing.model_copy(deep=True)
+            if body.processing is not None
+            else (preset.processing.model_copy(deep=True) if preset is not None else None)
+        ),
         story_mode=body.story_mode or "narrative",
         story_premise=(body.story_premise or "").strip(),
         blank_verso=(
@@ -1047,7 +1079,11 @@ def list_sessions() -> list[SessionSummary]:
     for directory in store.WEB_ROOT.iterdir():
         if not directory.is_dir() or not SID_RE.match(directory.name):
             continue
-        state = store.load_session(directory.name)
+        try:
+            state = store.load_session(directory.name)
+        except ValueError:
+            log.warning("ignoring corrupted session %s", directory.name)
+            continue
         if state is None:
             continue
         done_pages = [page for page in state.pages if page.status == "done"]
@@ -1081,8 +1117,11 @@ def list_sessions() -> list[SessionSummary]:
 
 @app.delete("/api/sessions/{sid}", status_code=204)
 def delete_session(sid: str) -> None:
-    state = _session(sid)
-    shutil.rmtree(store.session_dir(state.id), ignore_errors=True)
+    if not SID_RE.match(sid):
+        raise HTTPException(status_code=400, detail="invalid session id")
+    with store.session_lock(sid):
+        state = _session(sid)
+        shutil.rmtree(store.session_dir(state.id))
 
 
 @app.get("/api/sessions/{sid}", response_model=SessionView)
@@ -1113,6 +1152,8 @@ def patch_session(sid: str, body: SessionPatch) -> SessionView:
     if body.page_size is not None:
         state.page_size = body.page_size
         state.pdf_ready = False
+    if body.page_layout is not None:
+        state.page_layout = body.page_layout
     if body.negative_prompt is not None:
         state.negative_prompt = body.negative_prompt.strip()
     if body.processing is not None:
@@ -1186,7 +1227,10 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
         page.character_ids = body.character_ids
     seed = body.seed if body.seed is not None else cfg.seed
     candidates = body.candidates or cfg.candidates
-    full_prompt = compose_page_prompt(context, page.prompt, index, len(state.pages))
+    effective_layout = state.page_layout or default_page_layout_for_category(state.category)
+    full_prompt = compose_page_prompt(
+        context, page.prompt, index, len(state.pages), page_layout=effective_layout
+    )
     # Enrich prompt with textual character descriptions for selected book characters
     char_notes = [
         f"{c.name}: {c.description}"
@@ -1196,7 +1240,10 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
     if char_notes:
         full_prompt = f"{full_prompt}\n\nCharacters in this scene: {'; '.join(char_notes)}."
     references = _load_references(page.character_ids, state)
-    style_reference = store.load_session_style_bytes(sid)
+    style_reference = (
+        store.load_session_style_bytes(sid)
+        or store.load_page_layout_reference_bytes(state.category, index)
+    )
 
     lock = _locks[(sid, index)]
     if lock.locked():
@@ -1228,7 +1275,7 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
                 processed = await asyncio.to_thread(
                     prepare_page, img, cfg.image_px, cfg.processing
                 )
-                score = _score(processed)
+                score = score_line_art(processed)
                 if score > best_score:
                     best, best_score = img, score
                 if best_score >= 0.98:
@@ -1301,7 +1348,7 @@ def page_download(sid: str, index: int) -> FileResponse:
 def compose(sid: str) -> SessionView:
     state = _session(sid)
     cfg = _session_cfg(state)
-    pages = sorted(store.pages_dir(sid).glob("page-*.png"))
+    pages = store.session_page_files(state)
     if not pages:
         raise HTTPException(status_code=400, detail="no generated pages to compose")
     cover_path = store.cover_path(sid)
@@ -1323,6 +1370,88 @@ def compose(sid: str) -> SessionView:
     state.pdf_ready = True
     store.save_session(state)
     return _session_view(state)
+
+
+@app.get("/api/sessions/{sid}/kdp-preflight")
+def kdp_preflight(sid: str) -> dict[str, object]:
+    """Report known issues for a paperback interior before publication."""
+    state = _session(sid)
+    cfg = _session_cfg(state)
+    errors: list[str] = []
+    warnings: list[str] = []
+    pages = store.session_page_files(state)
+    if len(pages) != len(state.pages):
+        errors.append("Há ilustrações pendentes ou arquivos de página ausentes.")
+
+    front_count = sum((state.include_title_page, state.include_belongs_to_page,
+                       state.include_color_test_page))
+    for extra in state.front_extra_pages + state.back_extra_pages:
+        if extra.include_in_pdf and (extra.status != "done" or not store.extra_page_path(sid, extra.id).exists()):
+            errors.append(f"A página extra '{extra.title or extra.id}' ainda não está pronta.")
+    front_count += sum(extra.include_in_pdf for extra in state.front_extra_pages)
+    back_count = sum(extra.include_in_pdf for extra in state.back_extra_pages)
+    alignment = int(bool(state.blank_verso and state.pages and front_count % 2))
+    physical_pages = front_count + alignment + len(state.pages) * (2 if state.blank_verso else 1) + back_count
+    rounded_pages = physical_pages + physical_pages % 2
+    if rounded_pages < 24:
+        errors.append(f"O KDP exige pelo menos 24 páginas físicas. Contagem prevista: {rounded_pages}.")
+    if cfg.page_size == "square_8x8":
+        warnings.append("Confirme o formato 8 x 8 pol. no KDP para o mercado e as opções de impressão escolhidas.")
+    if cfg.bleed_in:
+        errors.append("A geometria de sangria deste PDF ainda precisa ser adaptada ao perfil KDP.")
+    for path in pages:
+        try:
+            with Image.open(path) as image:
+                width, height = image.size
+            trim_w, trim_h = cfg.trim_size_in
+            if min(width / trim_w, height / trim_h) < 300:
+                warnings.append(f"{path.name} tem menos de 300 pixels por polegada no tamanho de impressão.")
+        except (OSError, ValueError):
+            errors.append(f"Não foi possível ler a imagem {path.name}.")
+    interior_errors = errors.copy()
+    errors.append("A capa completa em PDF separado ainda não está disponível.")
+    if state.cover_include:
+        warnings.append("A prévia atual pode incluir a capa no miolo; a contagem acima considera a capa separada.")
+    warnings.append("A resolução dos arquivos processados não comprova a qualidade da imagem original.")
+    warnings.append("Confira as margens e os cortes de cada página no tamanho final de impressão.")
+    warnings.append("Revise direitos, metadados, conteúdo gerado por IA e fontes antes de publicar.")
+    warnings.append("A exportação do miolo ainda usa fontes PDF padrão; confira a incorporação e os caracteres antes do envio.")
+    warnings.append("Confira os arquivos no KDP Print Previewer e revise uma prova física.")
+    return {"physical_pages": physical_pages, "kdp_pages": rounded_pages,
+            "interior_errors": interior_errors, "errors": errors, "warnings": warnings}
+
+
+@app.post("/api/sessions/{sid}/kdp-interior")
+def export_kdp_interior(sid: str) -> FileResponse:
+    """Create a separate, no-bleed interior for review and download."""
+    if not SID_RE.fullmatch(sid):
+        raise HTTPException(status_code=400, detail="invalid session id")
+    with store.session_lock(sid):
+        state = _session(sid)
+        report = kdp_preflight(sid)
+        interior_errors = report["interior_errors"]
+        if interior_errors:
+            raise HTTPException(status_code=400, detail=interior_errors)
+
+        with tempfile.NamedTemporaryFile(prefix="cbg-interior-", suffix=".pdf", delete=False) as handle:
+            path = Path(handle.name)
+        try:
+            compose_pdf(
+                store.session_page_files(state), path, _session_cfg(state),
+                include_title_page=state.include_title_page,
+                blank_verso=state.blank_verso,
+                include_belongs_to_page=state.include_belongs_to_page,
+                include_color_test_page=state.include_color_test_page,
+                front_extra_images=_extra_page_images(state, "front"),
+                back_extra_images=_extra_page_images(state, "back"),
+                synopsis=state.story_synopsis,
+            )
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+    slug = re.sub(r"[^a-z0-9]+", "-", state.title.lower()).strip("-") or "color-book"
+    return FileResponse(path, media_type="application/pdf", filename=f"{slug}-interior.pdf",
+                        background=BackgroundTask(path.unlink, missing_ok=True))
 
 
 @app.get("/api/sessions/{sid}/pdf")

@@ -2,19 +2,31 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
 import os
 import re
 import secrets
+import threading
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
 
 from color_book_generator.config import PageSizeName, ProcessingConfig
+from color_book_generator.fsutil import atomic_write_text
 from color_book_generator.presets import StylePreset
 from color_book_generator.story import StoryMode
+
+try:  # POSIX advisory locks: coordinate several server processes on one data dir
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
+
+log = logging.getLogger(__name__)
 
 ID_PATTERN = r"^[a-f0-9]{8,32}$"
 ID_RE = re.compile(ID_PATTERN)
@@ -148,6 +160,7 @@ class SessionState(BaseModel):
     preset_id: str | None = None
     category: str = "cozy"
     page_size: PageSizeName = "letter_8.5x11"
+    page_layout: str = "single_full"
     negative_prompt: str = ""
     processing: ProcessingConfig | None = None
     characters: list[BookCharacter] = Field(default_factory=list)
@@ -168,6 +181,11 @@ class SessionState(BaseModel):
     front_extra_pages: list[ExtraPage] = Field(default_factory=list)
     back_extra_pages: list[ExtraPage] = Field(default_factory=list)
     current_step: int = 1
+
+    # JSON snapshot of what this object last read from / wrote to disk. Used by
+    # save_session as the common ancestor of a three-way merge so concurrent
+    # requests only persist the fields they actually changed.
+    _snapshot: dict[str, Any] | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -210,10 +228,9 @@ def load_custom_presets() -> list[StylePreset]:
 
 
 def save_custom_presets(items: list[StylePreset]) -> None:
-    WEB_ROOT.mkdir(parents=True, exist_ok=True)
-    presets_file().write_text(
+    atomic_write_text(
+        presets_file(),
         json.dumps([item.model_dump(mode="json") for item in items], indent=2),
-        encoding="utf-8",
     )
 
 
@@ -253,6 +270,38 @@ def clear_session_style(sid: str) -> None:
     session_style_path(sid).unlink(missing_ok=True)
 
 
+_LAYOUT_REF_FILES: dict[str, tuple[str, ...]] = {
+    "cozy": ("single_full.png", "cozy_2.png"),
+    "kids": ("single_caption.png", "kids_2.png"),
+    "manga": ("manga_action.png", "manga_2.png"),
+    "manhwa": ("manhwa_editorial.png", "manhwa_2.png"),
+    "kawaii": ("kawaii_stickers.png", "kawaii_2.png"),
+    "adult": ("adult_medallion.png", "adult_2.png"),
+}
+
+
+def page_layout_reference_paths(category: str) -> list[Path]:
+    """Return built-in illustrated page-layout reference PNGs for ``category``."""
+    base = Path(__file__).resolve().parent / "static" / "page-layouts"
+    if not base.exists():
+        return []
+    candidates = _LAYOUT_REF_FILES.get(category, _LAYOUT_REF_FILES["cozy"])
+    found = [base / name for name in candidates if (base / name).exists()]
+    for extra in sorted(base.glob(f"{category}_*.png")):
+        if extra not in found:
+            found.append(extra)
+    return found
+
+
+def load_page_layout_reference_bytes(category: str, page_index: int = 1) -> bytes | None:
+    """Pick a built-in page-layout reference image for ``category``, rotating per page."""
+    paths = page_layout_reference_paths(category)
+    if not paths:
+        return None
+    chosen = paths[(max(1, page_index) - 1) % len(paths)]
+    return chosen.read_bytes()
+
+
 def session_characters_dir(sid: str) -> Path:
     return session_dir(sid) / "characters"
 
@@ -283,10 +332,9 @@ def load_characters() -> list[CharacterRecord]:
 
 
 def save_characters(items: list[CharacterRecord]) -> None:
-    characters_dir().mkdir(parents=True, exist_ok=True)
-    characters_file().write_text(
+    atomic_write_text(
+        characters_file(),
         json.dumps([item.model_dump(mode="json") for item in items], indent=2),
-        encoding="utf-8",
     )
 
 
@@ -309,8 +357,7 @@ def load_settings() -> BookSettings | None:
 
 
 def save_settings(settings: BookSettings) -> None:
-    WEB_ROOT.mkdir(parents=True, exist_ok=True)
-    settings_file().write_text(settings.model_dump_json(indent=2), encoding="utf-8")
+    atomic_write_text(settings_file(), settings.model_dump_json(indent=2))
 
 
 def session_dir(sid: str) -> Path:
@@ -353,6 +400,75 @@ def _session_file(sid: str) -> Path:
     return session_dir(sid) / "session.json"
 
 
+def _session_backup_file(sid: str) -> Path:
+    return session_dir(sid) / "session.json.bak"
+
+
+def locks_dir() -> Path:
+    return WEB_ROOT / ".locks"
+
+
+def page_file(sid: str, index: int) -> Path:
+    return pages_dir(sid) / f"page-{index:03d}.png"
+
+
+def shift_page_files_after(sid: str, after_index: int, max_index: int) -> None:
+    """Shift on-disk page assets for indices > after_index up by 1 in reverse order."""
+    dirs = (pages_dir(sid), raw_dir(sid), preview_dir(sid))
+    for i in range(max_index, after_index, -1):
+        src_name = f"page-{i:03d}.png"
+        dst_name = f"page-{i + 1:03d}.png"
+        for directory in dirs:
+            src = directory / src_name
+            if src.exists():
+                src.replace(directory / dst_name)
+
+
+def insert_page_after(sid: str, after_index: int, new_page: PageState) -> SessionState:
+    """Atomically insert ``new_page`` at ``after_index + 1``, shifting later pages and files."""
+    with session_lock(sid):
+        state = load_session(sid)
+        if state is None:
+            raise FileNotFoundError(f"session not found: {sid}")
+        if len(state.pages) >= 200:
+            raise ValueError("limite maximo de 200 paginas atingido")
+        if after_index < 0 or after_index > len(state.pages):
+            raise ValueError("posicao de insercao invalida")
+        if any(p.index > after_index and p.status == "generating" for p in state.pages):
+            raise RuntimeError("aguarde a geracao das paginas seguintes terminar antes de inserir")
+
+        max_index = max((p.index for p in state.pages), default=0)
+        shift_page_files_after(sid, after_index, max_index)
+
+        for page in state.pages:
+            if page.index > after_index:
+                page.index += 1
+
+        new_page.index = after_index + 1
+        state.pages.append(new_page)
+        state.pages.sort(key=lambda item: item.index)
+        state.pdf_ready = False
+        save_session(state)
+        return state
+
+
+def session_page_files(state: SessionState) -> list[Path]:
+    """Processed page images that belong to the book, in reading order.
+
+    Only pages listed in the session are returned, so stray ``page-*.png``
+    files (e.g. left behind by an older, longer version of the book) never
+    end up in the PDF.
+    """
+    files: list[Path] = []
+    for page in sorted(state.pages, key=lambda item: item.index):
+        if page.status != "done":
+            continue
+        path = page_file(state.id, page.index)
+        if path.exists():
+            files.append(path)
+    return files
+
+
 def new_session_id() -> str:
     return secrets.token_hex(6)
 
@@ -378,6 +494,7 @@ def create_session(
     preset_id: str | None = None,
     category: str = "cozy",
     page_size: PageSizeName = "letter_8.5x11",
+    page_layout: str = "single_full",
     negative_prompt: str = "",
     processing: ProcessingConfig | None = None,
     story_mode: StoryMode = "narrative",
@@ -405,6 +522,7 @@ def create_session(
         preset_id=preset_id,
         category=category,
         page_size=page_size,
+        page_layout=page_layout,
         negative_prompt=negative_prompt,
         processing=processing,
         story_mode=story_mode,
@@ -427,19 +545,226 @@ def create_session(
     return state
 
 
+# --------------------------------------------------------------------------
+# Session locking and persistence
+#
+# Requests (and the autopilot thread) follow a load -> mutate -> save pattern,
+# sometimes with minutes of image generation in between. Writing the whole
+# in-memory object back would erase anything saved meanwhile. save_session
+# therefore does a three-way merge under a per-session lock:
+#   base   = what this object last read/wrote (SessionState._snapshot)
+#   ours   = the object now
+#   theirs = what is on disk now
+# Only fields changed since ``base`` are applied on top of ``theirs``. When the
+# same field changed on both sides, the current writer wins.
+# --------------------------------------------------------------------------
+
+_thread_locks: dict[str, threading.RLock] = {}
+_thread_locks_guard = threading.Lock()
+_lock_depth = threading.local()
+
+
+@contextlib.contextmanager
+def session_lock(sid: str) -> Iterator[None]:
+    """Exclusive, re-entrant lock for one book across threads and processes."""
+    with _thread_locks_guard:
+        lock = _thread_locks.setdefault(sid, threading.RLock())
+    with lock:
+        depths: dict[str, int] = getattr(_lock_depth, "value", None) or {}
+        _lock_depth.value = depths
+        depth = depths.get(sid, 0)
+        depths[sid] = depth + 1
+        try:
+            if depth > 0 or fcntl is None:
+                yield
+                return
+            locks_dir().mkdir(parents=True, exist_ok=True)
+            with open(locks_dir() / f"{sid}.lock", "a+b") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            depths[sid] -= 1
+            if not depths[sid]:
+                del depths[sid]
+
+
+_MISSING: Any = object()
+
+
+def _item_key(item: object) -> tuple[str, object] | None:
+    if isinstance(item, dict):
+        if "id" in item:
+            return ("id", item["id"])
+        if "index" in item:
+            return ("index", item["index"])
+    return None
+
+
+def _keyed(items: list[Any]) -> dict[tuple[str, object], Any] | None:
+    mapping: dict[tuple[str, object], Any] = {}
+    for item in items:
+        key = _item_key(item)
+        if key is None or key in mapping:
+            return None
+        mapping[key] = item
+    return mapping
+
+
+def _merge_lists(base: list[Any], ours: list[Any], theirs: list[Any]) -> Any:
+    b, o, t = _keyed(base), _keyed(ours), _keyed(theirs)
+    if b is None or o is None or t is None:
+        return ours
+    if list(o) != list(b):  # we added, removed or reordered items
+        order = list(o) + [key for key in t if key not in o]
+    else:
+        order = list(t) + [key for key in o if key not in t]
+    order += [key for key in b if key not in order]
+    merged: list[Any] = []
+    for key in order:
+        value = _merge_values(b.get(key, _MISSING), o.get(key, _MISSING), t.get(key, _MISSING))
+        if value is not _MISSING:
+            merged.append(value)
+    if merged and all(key[0] == "index" for key in order):
+        merged.sort(key=lambda item: item["index"])
+    return merged
+
+
+def _merge_values(base: Any, ours: Any, theirs: Any) -> Any:
+    if ours == base:
+        return theirs
+    if theirs in (base, ours):
+        return ours
+    if isinstance(ours, dict) and isinstance(theirs, dict):
+        base_dict = base if isinstance(base, dict) else {}
+        merged: dict[str, Any] = {}
+        for key in list(theirs) + [k for k in ours if k not in theirs]:
+            value = _merge_values(
+                base_dict.get(key, _MISSING), ours.get(key, _MISSING), theirs.get(key, _MISSING)
+            )
+            if value is not _MISSING:
+                merged[key] = value
+        return merged
+    if isinstance(ours, list) and isinstance(theirs, list):
+        return _merge_lists(base if isinstance(base, list) else [], ours, theirs)
+    return ours
+
+
+def merge_session_data(
+    base: dict[str, Any], ours: dict[str, Any], theirs: dict[str, Any]
+) -> dict[str, Any]:
+    """Three-way merge of session JSON documents (see module notes above)."""
+    merged = _merge_values(base, ours, theirs)
+    return merged if isinstance(merged, dict) else ours
+
+
+def _read_session_file(path: Path) -> SessionState | None:
+    try:
+        return SessionState.model_validate_json(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, ValidationError):
+        return None
+
+
 def load_session(sid: str) -> SessionState | None:
     path = _session_file(sid)
     if not path.exists():
         return None
-    data = json.loads(path.read_text(encoding="utf-8"))
-    return SessionState.model_validate(data)
+    state = _read_session_file(path)
+    if state is None:
+        backup = _read_session_file(_session_backup_file(sid))
+        if backup is None:
+            raise ValueError(f"session.json corrompido e sem backup valido: {sid}")
+        log.warning("session %s: session.json invalido, usando session.json.bak", sid)
+        state = backup
+        state.id = sid
+    state._snapshot = state.model_dump(mode="json")
+    return state
 
 
 def save_session(state: SessionState) -> None:
-    session_dir(state.id).mkdir(parents=True, exist_ok=True)
-    _session_file(state.id).write_text(
-        state.model_dump_json(indent=2), encoding="utf-8"
-    )
+    ours = state.model_dump(mode="json")
+    path = _session_file(state.id)
+    with session_lock(state.id):
+        if state._snapshot is not None and not path.exists():
+            raise FileNotFoundError(f"session deleted: {state.id}")
+        merged = ours
+        current = _read_session_file(path) if path.exists() else None
+        if current is not None:
+            theirs = current.model_dump(mode="json")
+            if state._snapshot is not None:
+                candidate = merge_session_data(state._snapshot, ours, theirs)
+                try:
+                    merged = SessionState.model_validate(candidate).model_dump(mode="json")
+                except ValidationError:
+                    log.warning("session %s: merge invalido, gravando versao atual", state.id)
+            # Keep the last known-good version for recovery from a bad write.
+            atomic_write_text(
+                _session_backup_file(state.id), json.dumps(theirs, indent=2, ensure_ascii=False)
+            )
+        atomic_write_text(path, json.dumps(merged, indent=2, ensure_ascii=False))
+    # Our own changes are now on disk; the next save only sends newer edits.
+    state._snapshot = ours
+
+
+def update_session(sid: str, mutate: Any) -> SessionState | None:
+    """Load the latest state, apply ``mutate(state)`` and save, all under the lock."""
+    with session_lock(sid):
+        state = load_session(sid)
+        if state is None:
+            return None
+        mutate(state)
+        save_session(state)
+        return state
+
+
+INTERRUPTED_MESSAGE = (
+    "Geracao interrompida antes de terminar (o servidor foi reiniciado). Gere novamente."
+)
+
+
+def recover_interrupted(state: SessionState) -> bool:
+    """Turn ``generating`` leftovers into retryable errors. Returns True if changed."""
+    changed = False
+    now = datetime.now()
+    for page in state.pages:
+        if page.status == "generating":
+            page.status, page.error, page.updated_at = "error", INTERRUPTED_MESSAGE, now
+            changed = True
+    for extra in [*state.front_extra_pages, *state.back_extra_pages]:
+        if extra.status == "generating":
+            extra.status, extra.error, extra.updated_at = "error", INTERRUPTED_MESSAGE, now
+            changed = True
+    for character in state.characters:
+        if character.sheet_status == "generating":
+            character.sheet_status, character.error = "error", INTERRUPTED_MESSAGE
+            character.updated_at = now
+            changed = True
+    if state.cover_status == "generating":
+        state.cover_status, state.cover_error = "error", INTERRUPTED_MESSAGE
+        state.cover_updated_at = now
+        changed = True
+    return changed
+
+
+def recover_interrupted_sessions() -> list[str]:
+    """Run at server start: no generation can be in flight in a fresh process."""
+    recovered: list[str] = []
+    if not WEB_ROOT.exists():
+        return recovered
+    for directory in sorted(WEB_ROOT.iterdir()):
+        if not directory.is_dir() or not ID_RE.match(directory.name):
+            continue
+        try:
+            with session_lock(directory.name):
+                state = load_session(directory.name)
+                if state is not None and recover_interrupted(state):
+                    save_session(state)
+                    recovered.append(state.id)
+        except ValueError as exc:
+            log.warning("session %s: nao foi possivel recuperar: %s", directory.name, exc)
+    return recovered
 
 
 def migrate_referenced_characters(state: SessionState) -> bool:

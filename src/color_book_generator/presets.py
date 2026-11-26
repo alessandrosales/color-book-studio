@@ -83,6 +83,20 @@ CATEGORY_META: list[dict[str, str]] = [
     },
 ]
 
+CATEGORY_PAGE_LAYOUT: dict[str, str] = {
+    "cozy": "single_full",
+    "kids": "single_caption",
+    "manga": "manga_action",
+    "manhwa": "manhwa_editorial",
+    "kawaii": "kawaii_stickers",
+    "adult": "adult_medallion",
+}
+
+
+def default_page_layout_for_category(category: str) -> str:
+    """Return the implicit page-layout preset for a book style category."""
+    return CATEGORY_PAGE_LAYOUT.get(category, "single_full")
+
 _RULES = (
     "Pure black line art on a pure white background, clean closed contours ready for coloring, "
     "zero color, zero gray fills, zero shading, no text."

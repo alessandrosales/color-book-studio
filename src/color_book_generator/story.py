@@ -456,3 +456,126 @@ def generate_full_book_blueprint(
         characters=characters,
         pages=scripted,
     )
+
+
+def generate_bridge_page(
+    *,
+    book_title: str,
+    premise: str = "",
+    synopsis: str = "",
+    mode: StoryMode = "narrative",
+    language: str = "en",
+    preset: StylePreset | None = None,
+    style_context: str = "",
+    characters: list[CharacterBrief] | None = None,
+    prev_page: ScriptedPage | None = None,
+    next_page: ScriptedPage | None = None,
+    new_index: int = 1,
+    total_after: int = 1,
+    hint: str = "",
+    provider: str = "",
+    model: str | None = None,
+) -> ScriptedPage:
+    """Generate ONE new coloring-book page bridging prev_page and next_page in context."""
+    cast = characters or []
+    cast_lines = (
+        "\n".join(
+            f"- {c.name}: {c.description or 'personagem recorrente do livro'}"
+            for c in cast
+        )
+        if cast
+        else "- Nenhum personagem fixo cadastrado."
+    )
+    style_desc = (
+        f"{preset.name} ({preset.tagline}). Concept: {preset.concept_prompt}"
+        if preset is not None
+        else (style_context[:180] or "Livro de colorir P&B")
+    )
+
+    def _describe_neighbor(label: str, page: ScriptedPage | None) -> str:
+        if page is None:
+            return f"{label}: (nenhuma — esta nova página ficará na extremidade do livro)"
+        chars = ", ".join(page.character_names) if page.character_names else "nenhum especificado"
+        return (
+            f"{label} (Página {page.index}):\n"
+            f"  Título: {page.title or f'Página {page.index}'}\n"
+            f"  Prompt visual: {page.scene_prompt or '(vazio)'}\n"
+            f"  Legenda/fala: {page.caption_text or '(sem legenda)'}\n"
+            f"  Personagens: {chars}"
+        )
+
+    if prev_page is not None and next_page is not None:
+        bridge_goal = (
+            "Create a natural transitional scene that happens RIGHT AFTER the previous page "
+            "and smoothly leads into the next page. Maintain continuity of setting, mood, and characters "
+            "without repeating the exact pose or composition of either neighbor."
+        )
+    elif prev_page is not None:
+        bridge_goal = (
+            "Create a natural continuation scene right after the previous page, "
+            "with a fresh composition and action that fits the book's universe."
+        )
+    else:
+        bridge_goal = (
+            "Create an opening scene that naturally sets up the next page and introduces the book's world."
+        )
+
+    instructions = (
+        "You are an expert bestselling KDP coloring book author and visual director. "
+        "Return ONLY valid JSON with no markdown prose outside the JSON object.\n"
+        "JSON schema:\n"
+        "{\n"
+        '  "title": "short scene label",\n'
+        '  "scene_prompt": "clear visual coloring-book description (subject, pose, action, props, framing; single clear drawable scene, NO colors, NO shading, NO text inside the drawing)",\n'
+        '  "caption_text": "short engaging caption or speech bubble text for the page (max 14 words)",\n'
+        '  "character_names": ["Exact Character Name from cast if present in this scene"]\n'
+        "}"
+    )
+
+    hint_block = f"\nUser note for this new page: {hint.strip()}\n" if hint.strip() else ""
+    user_prompt = (
+        f"Book title: {book_title or 'Coloring Book'}\n"
+        f"Language for title and caption_text: {language}\n"
+        f"Book mode: {mode}\n"
+        f"Premise: {premise.strip() or '(not set)'}\n"
+        f"Synopsis: {synopsis.strip() or '(not set)'}\n"
+        f"Visual style: {style_desc}\n"
+        f"Position of the new page: page {new_index} of {total_after}\n"
+        f"Registered characters:\n{cast_lines}\n\n"
+        f"{_describe_neighbor('Previous page', prev_page)}\n\n"
+        f"{_describe_neighbor('Next page', next_page)}\n"
+        f"{hint_block}\n"
+        f"Task: {bridge_goal}\n"
+        "Rules:\n"
+        "- Return ONE single scene object matching the JSON schema.\n"
+        "- When registered characters appear in the scene, include their exact names in character_names.\n"
+        "- Never ask for colors or shading in scene_prompt.\n"
+    )
+
+    raw = _call_text_llm(
+        instructions,
+        user_prompt,
+        preferred_provider=provider,
+        preferred_model=model,
+    )
+    data = _extract_json_object(raw)
+
+    by_name = {c.name.strip().lower(): c.id for c in cast}
+    scene = str(data.get("scene_prompt") or data.get("prompt") or "").strip()
+    if not scene:
+        raise StoryGenerationError("O modelo nao retornou a descricao visual da nova pagina.")
+    title_str = str(data.get("title") or f"Página {new_index}").strip()
+    caption = str(data.get("caption_text") or data.get("caption") or "").strip()
+    raw_names = data.get("character_names") or []
+    names = [str(n).strip() for n in raw_names if isinstance(n, str) and n.strip()]
+    unique_ids = list(
+        dict.fromkeys(by_name[n.lower()] for n in names if n.lower() in by_name)
+    )
+    return ScriptedPage(
+        index=new_index,
+        title=title_str,
+        scene_prompt=scene,
+        caption_text=caption,
+        character_names=names,
+        character_ids=unique_ids,
+    )

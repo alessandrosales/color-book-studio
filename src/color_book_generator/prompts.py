@@ -23,6 +23,41 @@ LAYOUT_RULES = (
     "closed shapes suitable for coloring, consistent line weight"
 )
 
+PAGE_LAYOUT_PROMPTS: dict[str, str] = {
+    "single_full": (
+        "Page layout: single centered Bold & Easy / Cozy scene framed inside a clean rounded square border "
+        "with generous 12-15% pure white outer margins, thick uniform monoline outlines, large open colorable areas, "
+        "no external captions or speech balloons."
+    ),
+    "single_caption": (
+        "Page layout: children's storybook coloring page with one open, friendly illustration filling the upper "
+        "70-75% of the page, generous white breathing space, and a clean empty white band at the bottom 20-25% "
+        "reserved for narrative caption text."
+    ),
+    "manga_action": (
+        "Page layout: authentic Japanese manga multi-panel page with narrow 5-8% outer margins, 4 to 6 asymmetric "
+        "crisp black-bordered panels including a diagonal action cut, one dominant central impact panel, narrow "
+        "gutters, expressive variable-weight ink lines, and clean empty white vertical-oval speech balloon shapes "
+        "crossing panel borders where dialogue fits."
+    ),
+    "manhwa_editorial": (
+        "Page layout: Korean manhwa print page adapted from webtoon vertical rhythm with generous 20-30% white "
+        "margins and wide gutters, 3 clean rectangular panels (one cinematic upper panel and tall vertical beat "
+        "panels below), thin crisp digital black line art, and clean round speech balloon outlines floating "
+        "across the white gutters."
+    ),
+    "kawaii_stickers": (
+        "Page layout: kawaii chibi / sticker-cluster coloring page arranged as a playful 2x2 grid of rounded "
+        "vignette frames (or compact central sticker cluster) with cute floating stars and hearts, clean 10% "
+        "outer margins, smooth medium-fine outlines, and no external text."
+    ),
+    "adult_medallion": (
+        "Page layout: adult intricate coloring page framed as a symmetrical circular medallion, mandala, or "
+        "organic botanical arch with fine detailed linework, dense ornamental petals/vines/patterns, crisp "
+        "pure black lines on white paper, and zero text or speech balloons."
+    ),
+}
+
 
 def default_context_prompt(config: BookConfig) -> str:
     """The shared page-standard prompt applied to every page."""
@@ -36,11 +71,25 @@ def default_context_prompt(config: BookConfig) -> str:
     return " ".join(p for p in parts if p)
 
 
-def compose_page_prompt(context: str, page_prompt: str, index: int, total: int) -> str:
-    """Combine the shared context prompt with a single page's prompt."""
+def compose_page_prompt(
+    context: str,
+    page_prompt: str,
+    index: int,
+    total: int,
+    *,
+    page_layout: str = "single_full",
+) -> str:
+    """Combine the shared context prompt, page layout directive, and a single page's prompt."""
+    parts: list[str] = []
     head = context.strip()
-    body = f"Page {index} of {total}. Subject: {page_prompt.strip().rstrip('.')}."
-    return f"{head}\n\n{body}" if head else body
+    if head:
+        parts.append(head)
+    if page_layout and page_layout != "single_full":
+        layout_rule = PAGE_LAYOUT_PROMPTS.get(page_layout)
+        if layout_rule:
+            parts.append(layout_rule)
+    parts.append(f"Page {index} of {total}. Subject: {page_prompt.strip().rstrip('.')}.")
+    return "\n\n".join(parts)
 
 
 def build_page_prompt(config: BookConfig, subject: str, index: int) -> str:
