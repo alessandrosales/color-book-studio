@@ -11,9 +11,10 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel, Field
@@ -27,10 +28,14 @@ from color_book_generator.auth.codex import DEFAULT_CODEX_MODEL, normalize_codex
 from color_book_generator.config import (
     BookConfig,
     CaptionConfig,
+    PageSizeName,
+    ProcessingConfig,
     default_book_config_path,
     load_book_config,
 )
 from color_book_generator.layout.pdf import compose_pdf
+from color_book_generator.pipeline import _score
+from color_book_generator.presets import get_preset
 from color_book_generator.processing.line_art import prepare_page
 from color_book_generator.prompts import (
     compose_page_prompt,
@@ -38,16 +43,73 @@ from color_book_generator.prompts import (
     default_subjects,
 )
 from color_book_generator.providers import available_providers, get_provider
+from color_book_generator.providers.base import generate_matching
+from color_book_generator.story import StoryMode
 from color_book_generator.web import archive as backup_archive
 from color_book_generator.web import store
 from color_book_generator.web.auth_flow import flow as codex_flow
+from color_book_generator.web.routers.presets import router as presets_router
+from color_book_generator.web.routers.studio import (
+    BookCharacterView,
+    _style_anchor_view,
+    read_upload_limited,
+)
+from color_book_generator.web.routers.studio import (
+    _character_view as _book_character_view,
+)
+from color_book_generator.web.routers.studio import (
+    router as studio_router,
+)
 from color_book_generator.web.store import PageState, SessionState
 
 STATIC_DIR = Path(__file__).parent / "static"
 SID_RE = re.compile(r"^[a-f0-9]{8,32}$")
+_MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_DEFAULT_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}
 
 app = FastAPI(title="Color Book Studio", docs_url="/api/docs", openapi_url="/api/openapi.json")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.include_router(presets_router)
+app.include_router(studio_router)
+
+
+def _allowed_hosts() -> set[str]:
+    extra = {
+        h.strip().lower()
+        for h in os.getenv("CBG_ALLOWED_HOSTS", "").split(",")
+        if h.strip()
+    }
+    return _DEFAULT_ALLOWED_HOSTS | extra
+
+
+@app.middleware("http")
+async def protect_host_and_origin(
+    request: Request, call_next: RequestResponseEndpoint
+) -> Response:
+    host_header = (request.headers.get("host") or "").strip()
+    if host_header:
+        parsed_host = urlsplit(f"http://{host_header}")
+        hostname = (parsed_host.hostname or "").lower()
+        if hostname not in _allowed_hosts():
+            return JSONResponse(status_code=403, content={"detail": "invalid host header"})
+
+    if request.method.upper() in _MUTATING_METHODS:
+        fetch_site = (request.headers.get("sec-fetch-site") or "").strip().lower()
+        if fetch_site and fetch_site not in {"same-origin", "none"}:
+            return JSONResponse(status_code=403, content={"detail": "cross-site request blocked"})
+        origin = (request.headers.get("origin") or "").strip()
+        if origin:
+            if origin.lower() == "null":
+                return JSONResponse(
+                    status_code=403, content={"detail": "cross-origin request blocked"}
+                )
+            parsed_origin = urlsplit(origin)
+            if not host_header or parsed_origin.netloc.lower() != host_header.lower():
+                return JSONResponse(
+                    status_code=403, content={"detail": "cross-origin request blocked"}
+                )
+
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -146,10 +208,15 @@ class SessionSummary(BaseModel):
     provider: str
     model: str
     cover_url: str | None
+    preset_id: str | None = None
+    category: str = "cozy"
+    page_size: str = "letter_8.5x11"
+    characters_count: int = 0
 
 
 class CodexModels(BaseModel):
     models: list[str]
+    cheapest: str | None = None
 
 
 class AuthStatus(BaseModel):
@@ -172,6 +239,17 @@ class SessionCreate(BaseModel):
     provider: str | None = None
     model: str | None = None
     subjects: list[str] | None = None
+    language: str | None = None
+    preset_id: str | None = None
+    category: str | None = None
+    page_size: PageSizeName | None = None
+    negative_prompt: str | None = None
+    story_mode: StoryMode | None = None
+    story_premise: str | None = None
+    blank_verso: bool | None = None
+    include_title_page: bool | None = None
+    include_belongs_to_page: bool | None = None
+    include_color_test_page: bool | None = None
     caption_enabled: bool | None = None
     caption_style: CaptionStyle | None = None
     caption_position: CaptionPosition | None = None
@@ -186,6 +264,20 @@ class SessionPatch(BaseModel):
     provider: str | None = None
     model: str | None = None
     pages: int | None = Field(default=None, ge=1, le=200)
+    language: str | None = None
+    preset_id: str | None = None
+    category: str | None = None
+    page_size: PageSizeName | None = None
+    negative_prompt: str | None = None
+    processing: ProcessingConfig | None = None
+    story_mode: StoryMode | None = None
+    story_premise: str | None = None
+    story_synopsis: str | None = None
+    blank_verso: bool | None = None
+    include_title_page: bool | None = None
+    include_belongs_to_page: bool | None = None
+    include_color_test_page: bool | None = None
+    current_step: int | None = Field(default=None, ge=1, le=4)
     caption_enabled: bool | None = None
     caption_style: CaptionStyle | None = None
     caption_position: CaptionPosition | None = None
@@ -206,6 +298,7 @@ class GenerateRequest(BaseModel):
 
 
 class PagePatch(BaseModel):
+    title: str | None = None
     prompt: str | None = None
     caption_text: str | None = None
     character_ids: list[str] | None = None
@@ -219,6 +312,7 @@ class CharacterReferencePayload(BaseModel):
 
 class PageView(BaseModel):
     index: int
+    title: str = ""
     prompt: str
     caption_text: str
     character_ids: list[str]
@@ -249,6 +343,23 @@ class SessionView(BaseModel):
     caption_font_size: float
     trim_in: tuple[float, float]
     dpi: int
+    language: str = "en"
+    preset_id: str | None = None
+    category: str = "cozy"
+    page_size: str = "letter_8.5x11"
+    negative_prompt: str = ""
+    processing: ProcessingConfig | None = None
+    characters: list[BookCharacterView] = Field(default_factory=list)
+    style_url: str | None = None
+    style_inherited_global: bool = False
+    story_mode: StoryMode = "narrative"
+    story_premise: str = ""
+    story_synopsis: str = ""
+    blank_verso: bool = False
+    include_title_page: bool = True
+    include_belongs_to_page: bool = False
+    include_color_test_page: bool = False
+    current_step: int = 1
 
 
 def _stamp(state: SessionState, page: PageState) -> str:
@@ -262,6 +373,7 @@ def _page_view(state: SessionState, page: PageState) -> PageView:
     v = _stamp(state, page)
     return PageView(
         index=page.index,
+        title=page.title,
         prompt=page.prompt,
         caption_text=page.caption_text,
         character_ids=page.character_ids,
@@ -276,9 +388,28 @@ def _page_view(state: SessionState, page: PageState) -> PageView:
     )
 
 
-def _session_view(state: SessionState) -> SessionView:
+def _session_cfg(state: SessionState) -> BookConfig:
     cfg = _config()
+    updates: dict[str, object] = {
+        "title": state.title or cfg.title,
+        "language": state.language or "en",
+        "page_size": state.page_size,
+        "blank_verso": state.blank_verso,
+        "include_title_page": state.include_title_page,
+        "include_belongs_to_page": state.include_belongs_to_page,
+        "include_color_test_page": state.include_color_test_page,
+    }
+    if state.processing is not None:
+        updates["processing"] = state.processing
+    if state.negative_prompt:
+        updates["negative_prompt"] = state.negative_prompt
+    return cfg.model_copy(update=updates)
+
+
+def _session_view(state: SessionState) -> SessionView:
+    cfg = _session_cfg(state)
     has_pdf = state.pdf_ready and (store.session_dir(state.id) / "book.pdf").exists()
+    style_anchor = _style_anchor_view(state.id)
     return SessionView(
         id=state.id,
         title=state.title,
@@ -296,6 +427,23 @@ def _session_view(state: SessionState) -> SessionView:
         caption_font_size=state.caption_font_size,
         trim_in=cfg.trim_size_in,
         dpi=cfg.dpi,
+        language=state.language,
+        preset_id=state.preset_id,
+        category=state.category,
+        page_size=state.page_size,
+        negative_prompt=state.negative_prompt or cfg.negative_prompt,
+        processing=cfg.processing,
+        characters=[_book_character_view(state.id, c) for c in state.characters],
+        style_url=style_anchor.url,
+        style_inherited_global=style_anchor.inherited_global,
+        story_mode=state.story_mode,
+        story_premise=state.story_premise,
+        story_synopsis=state.story_synopsis,
+        blank_verso=state.blank_verso,
+        include_title_page=state.include_title_page,
+        include_belongs_to_page=state.include_belongs_to_page,
+        include_color_test_page=state.include_color_test_page,
+        current_step=state.current_step,
     )
 
 
@@ -320,7 +468,7 @@ def _session_caption(state: SessionState) -> CaptionConfig:
 
 
 def _write_page_assets(state: SessionState, page: PageState, img: Image.Image) -> None:
-    cfg = _config()
+    cfg = _session_cfg(state)
     processed = prepare_page(
         img,
         cfg.image_px,
@@ -348,10 +496,11 @@ def _provider_generate(
     style_reference: bytes | None = None,
 ) -> Image.Image:
     provider = get_provider(provider_name, model)
-    return provider.generate(
+    return generate_matching(
+        provider,
         prompt,
-        negative_prompt=negative,
         target_size=target_px,
+        negative_prompt=negative,
         seed=seed,
         references=references,
         style_reference=style_reference,
@@ -366,13 +515,23 @@ def _character_view(record: store.CharacterRecord) -> CharacterReferencePayload:
     )
 
 
-def _load_references(ids: list[str]) -> list[tuple[str, bytes]]:
+def _load_references(ids: list[str], state: SessionState | None = None) -> list[tuple[str, bytes]]:
     if not ids:
         return []
-    records = {record.id: record for record in store.load_characters()}
+    book_records = {c.id: c for c in (state.characters if state is not None else [])}
+    global_records = {record.id: record for record in store.load_characters()}
     references: list[tuple[str, bytes]] = []
     for cid in ids:
-        record = records.get(cid)
+        if state is not None and cid in book_records:
+            char = book_records[cid]
+            book_path = store.session_characters_dir(state.id) / char.filename
+            if book_path.exists():
+                references.append((char.name, book_path.read_bytes()))
+                continue
+            if cid not in global_records:
+                # Character registered in the book without an image yet: skip binary ref gracefully
+                continue
+        record = global_records.get(cid)
         if record is None:
             raise HTTPException(
                 status_code=400, detail=f"personagem nao encontrado: {cid}"
@@ -404,7 +563,7 @@ def get_style() -> StyleView:
 
 @app.post("/api/style", response_model=StyleView)
 async def set_style(image: UploadFile = File(...)) -> StyleView:
-    data = await image.read()
+    data = await read_upload_limited(image)
     if not data:
         raise HTTPException(status_code=400, detail="envie uma imagem")
     try:
@@ -438,9 +597,10 @@ def use_page_as_style(sid: str, index: int) -> StyleView:
     source = store.pages_dir(sid) / f"page-{index:03d}.png"
     if not source.exists():
         raise HTTPException(status_code=400, detail="pagina ainda nao gerada")
-    store.style_dir().mkdir(parents=True, exist_ok=True)
-    store.style_path().write_bytes(source.read_bytes())
-    return _style_view()
+    data = source.read_bytes()
+    store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
+    store.session_style_path(sid).write_bytes(data)
+    return StyleView(url=_style_anchor_view(sid).url)
 
 
 @app.get("/api/characters", response_model=list[CharacterReferencePayload])
@@ -461,11 +621,9 @@ async def create_character(
     clean = name.strip()
     if not clean:
         raise HTTPException(status_code=400, detail="informe um nome para o personagem")
-    data = await image.read()
+    data = await read_upload_limited(image)
     if not data:
         raise HTTPException(status_code=400, detail="envie uma imagem")
-    if len(data) > 12 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="imagem maior que 12 MB")
     try:
         with Image.open(io.BytesIO(data)) as source:
             source.load()
@@ -545,7 +703,16 @@ API_FEATURES = [
     "backup",
     "sessions-list",
     "multi-book",
+    "presets",
+    "character-sheets",
+    "story-script",
+    "kdp-extras",
+    "autopilot",
 ]
+
+
+class ExportSelectedRequest(BaseModel):
+    session_ids: list[str]
 
 
 @app.get("/api/export")
@@ -556,6 +723,48 @@ def export_backup() -> FileResponse:
         path,
         media_type="application/zip",
         filename=filename,
+        background=BackgroundTask(path.unlink),
+    )
+
+
+@app.post("/api/export/selected")
+def export_selected(body: ExportSelectedRequest) -> FileResponse:
+    valid_ids = [sid for sid in body.session_ids if SID_RE.match(sid)]
+    if not valid_ids:
+        raise HTTPException(status_code=400, detail="selecione ao menos um livro valido")
+    try:
+        path = backup_archive.export_selected_to_temp(valid_ids)
+    except backup_archive.ArchiveError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if len(valid_ids) == 1:
+        state = store.load_session(valid_ids[0])
+        slug = (
+            re.sub(r"[^a-z0-9]+", "-", (state.title if state else "book").lower()).strip("-")
+            or "color-book"
+        )
+        filename = f"{slug}.zip"
+    else:
+        filename = f"color-books-{len(valid_ids)}-{datetime.now():%Y%m%d-%H%M}.zip"
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(path.unlink),
+    )
+
+
+@app.get("/api/sessions/{sid}/export")
+def export_single_session(sid: str) -> FileResponse:
+    state = _session(sid)
+    try:
+        path = backup_archive.export_selected_to_temp([state.id])
+    except backup_archive.ArchiveError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    slug = re.sub(r"[^a-z0-9]+", "-", state.title.lower()).strip("-") or "color-book"
+    return FileResponse(
+        path,
+        media_type="application/zip",
+        filename=f"{slug}.zip",
         background=BackgroundTask(path.unlink),
     )
 
@@ -589,7 +798,9 @@ def defaults() -> DefaultsView:
         dpi=cfg.dpi,
         image_px=cfg.image_px,
         codex_authenticated=codex_auth.is_authenticated(),
-        codex_model=DEFAULT_CODEX_MODEL,
+        codex_model=codex_auth.cheapest_codex_model(
+            codex_auth.available_models() if codex_auth.is_authenticated() else None
+        ),
         openai_configured=bool(os.getenv("OPENAI_API_KEY")),
         caption_enabled=cfg.caption.enabled,
         caption_style=cfg.caption.style,
@@ -639,8 +850,12 @@ def codex_status() -> AuthStatus:
 @app.get("/api/auth/codex/models", response_model=CodexModels)
 def codex_models() -> CodexModels:
     if not codex_auth.is_authenticated():
-        return CodexModels(models=[])
-    return CodexModels(models=codex_auth.available_models())
+        return CodexModels(models=[], cheapest=None)
+    models = codex_auth.available_models()
+    return CodexModels(
+        models=models,
+        cheapest=codex_auth.cheapest_codex_model(models) if models else DEFAULT_CODEX_MODEL,
+    )
 
 
 @app.post("/api/auth/codex/start", response_model=AuthStatus)
@@ -656,9 +871,17 @@ def codex_logout() -> AuthStatus:
 @app.post("/api/sessions", response_model=SessionView, status_code=201)
 def create_session(body: SessionCreate) -> SessionView:
     cfg = _config()
+    preset = (
+        get_preset(body.preset_id, store.load_custom_presets())
+        if body.preset_id
+        else None
+    )
     provider = body.provider or cfg.provider
     model = body.model or cfg.model
-    context = (body.context_prompt or default_context_prompt(cfg)).strip()
+    context = (
+        body.context_prompt
+        or (preset.context_prompt if preset is not None else default_context_prompt(cfg))
+    ).strip()
 
     base_cfg = cfg.model_copy(update={"pages": body.pages})
     if body.subjects:
@@ -671,16 +894,17 @@ def create_session(body: SessionCreate) -> SessionView:
     pages = [
         PageState(index=i + 1, prompt=subject) for i, subject in enumerate(subjects)
     ]
+    cap_defaults = preset.caption if preset is not None else cfg.caption
     caption_style = (
-        body.caption_style if body.caption_style is not None else cfg.caption.style
+        body.caption_style if body.caption_style is not None else cap_defaults.style
     )
     caption_position = (
-        body.caption_position if body.caption_position is not None else cfg.caption.position
+        body.caption_position if body.caption_position is not None else cap_defaults.position
     )
     caption_font_family = (
         body.caption_font_family
         if body.caption_font_family is not None
-        else cfg.caption.font_family
+        else cap_defaults.font_family
     )
     state = store.create_session(
         pages=pages,
@@ -689,7 +913,7 @@ def create_session(body: SessionCreate) -> SessionView:
         provider=provider,
         model=model,
         caption_enabled=(
-            body.caption_enabled if body.caption_enabled is not None else cfg.caption.enabled
+            body.caption_enabled if body.caption_enabled is not None else cap_defaults.enabled
         ),
         caption_style=caption_style,
         caption_position=caption_position,
@@ -697,12 +921,52 @@ def create_session(body: SessionCreate) -> SessionView:
         caption_font_bold=(
             body.caption_font_bold
             if body.caption_font_bold is not None
-            else cfg.caption.bold
+            else cap_defaults.bold
         ),
         caption_font_size=(
             body.caption_font_size
             if body.caption_font_size is not None
-            else cfg.caption.font_size_ratio
+            else cap_defaults.font_size_ratio
+        ),
+        language=body.language or "en",
+        preset_id=preset.id if preset is not None else body.preset_id,
+        category=body.category or (preset.category if preset is not None else "cozy"),
+        page_size=body.page_size or (preset.page_size if preset is not None else cfg.page_size),
+        negative_prompt=(
+            body.negative_prompt
+            if body.negative_prompt is not None
+            else (preset.negative_prompt if preset is not None else cfg.negative_prompt)
+        ),
+        processing=preset.processing.model_copy(deep=True) if preset is not None else None,
+        story_mode=body.story_mode or "narrative",
+        story_premise=(body.story_premise or "").strip(),
+        blank_verso=(
+            body.blank_verso
+            if body.blank_verso is not None
+            else (preset.blank_verso if preset is not None else cfg.blank_verso)
+        ),
+        include_title_page=(
+            body.include_title_page
+            if body.include_title_page is not None
+            else (preset.include_title_page if preset is not None else cfg.include_title_page)
+        ),
+        include_belongs_to_page=(
+            body.include_belongs_to_page
+            if body.include_belongs_to_page is not None
+            else (
+                preset.include_belongs_to_page
+                if preset is not None
+                else cfg.include_belongs_to_page
+            )
+        ),
+        include_color_test_page=(
+            body.include_color_test_page
+            if body.include_color_test_page is not None
+            else (
+                preset.include_color_test_page
+                if preset is not None
+                else cfg.include_color_test_page
+            )
         ),
     )
     _normalize_provider(state)
@@ -738,6 +1002,10 @@ def list_sessions() -> list[SessionSummary]:
                     if cover is not None
                     else None
                 ),
+                preset_id=state.preset_id,
+                category=state.category,
+                page_size=state.page_size,
+                characters_count=len(state.characters),
             )
         )
     summaries.sort(
@@ -768,6 +1036,40 @@ def patch_session(sid: str, body: SessionPatch) -> SessionView:
         state.provider = body.provider
     if body.model is not None:
         state.model = body.model
+    if body.language is not None:
+        state.language = body.language
+        state.pdf_ready = False
+    if body.preset_id is not None:
+        state.preset_id = body.preset_id
+    if body.category is not None:
+        state.category = body.category
+    if body.page_size is not None:
+        state.page_size = body.page_size
+        state.pdf_ready = False
+    if body.negative_prompt is not None:
+        state.negative_prompt = body.negative_prompt.strip()
+    if body.processing is not None:
+        state.processing = body.processing
+    if body.story_mode is not None:
+        state.story_mode = body.story_mode
+    if body.story_premise is not None:
+        state.story_premise = body.story_premise.strip()
+    if body.story_synopsis is not None:
+        state.story_synopsis = body.story_synopsis.strip()
+    if body.blank_verso is not None:
+        state.blank_verso = body.blank_verso
+        state.pdf_ready = False
+    if body.include_title_page is not None:
+        state.include_title_page = body.include_title_page
+        state.pdf_ready = False
+    if body.include_belongs_to_page is not None:
+        state.include_belongs_to_page = body.include_belongs_to_page
+        state.pdf_ready = False
+    if body.include_color_test_page is not None:
+        state.include_color_test_page = body.include_color_test_page
+        state.pdf_ready = False
+    if body.current_step is not None:
+        state.current_step = body.current_step
     if body.caption_enabled is not None:
         state.caption_enabled = body.caption_enabled
     if body.caption_style is not None:
@@ -791,7 +1093,7 @@ def patch_session(sid: str, body: SessionPatch) -> SessionView:
 async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView:
     state = _session(sid)
     page = _page(state, index)
-    cfg = _config()
+    cfg = _session_cfg(state)
 
     context = (body.context_prompt or state.context_prompt).strip()
     if body.provider:
@@ -808,8 +1110,16 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
     seed = body.seed if body.seed is not None else cfg.seed
     candidates = body.candidates or cfg.candidates
     full_prompt = compose_page_prompt(context, page.prompt, index, len(state.pages))
-    references = _load_references(page.character_ids)
-    style_reference = store.load_style_bytes()
+    # Enrich prompt with textual character descriptions for selected book characters
+    char_notes = [
+        f"{c.name}: {c.description}"
+        for c in state.characters
+        if c.id in page.character_ids and c.description.strip()
+    ]
+    if char_notes:
+        full_prompt = f"{full_prompt}\n\nCharacters in this scene: {'; '.join(char_notes)}."
+    references = _load_references(page.character_ids, state)
+    style_reference = store.load_session_style_bytes(sid)
 
     lock = _locks[(sid, index)]
     if lock.locked():
@@ -822,6 +1132,7 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
         store.save_session(state)
         try:
             best: Image.Image | None = None
+            best_score = float("-inf")
             for _ in range(candidates):
                 img = await asyncio.to_thread(
                     _provider_generate,
@@ -834,8 +1145,17 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
                     references,
                     style_reference,
                 )
-                best = img
-                break
+                if candidates == 1:
+                    best = img
+                    break
+                processed = await asyncio.to_thread(
+                    prepare_page, img, cfg.image_px, cfg.processing
+                )
+                score = _score(processed)
+                if score > best_score:
+                    best, best_score = img, score
+                if best_score >= 0.98:
+                    break
             assert best is not None
             await asyncio.to_thread(_write_page_assets, state, page, best)
             page.status = "done"
@@ -854,6 +1174,8 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
 def patch_page(sid: str, index: int, body: PagePatch) -> PageView:
     state = _session(sid)
     page = _page(state, index)
+    if body.title is not None:
+        page.title = body.title.strip()
     if body.prompt is not None:
         page.prompt = body.prompt.strip()
     if body.caption_text is not None:
@@ -901,7 +1223,7 @@ def page_download(sid: str, index: int) -> FileResponse:
 @app.post("/api/sessions/{sid}/compose", response_model=SessionView)
 def compose(sid: str) -> SessionView:
     state = _session(sid)
-    cfg = _config()
+    cfg = _session_cfg(state)
     pages = sorted(store.pages_dir(sid).glob("page-*.png"))
     if not pages:
         raise HTTPException(status_code=400, detail="no generated pages to compose")
@@ -909,8 +1231,10 @@ def compose(sid: str) -> SessionView:
         pages,
         store.session_dir(sid) / "book.pdf",
         cfg,
-        include_title_page=cfg.include_title_page,
-        blank_verso=cfg.blank_verso,
+        include_title_page=state.include_title_page,
+        blank_verso=state.blank_verso,
+        include_belongs_to_page=state.include_belongs_to_page,
+        include_color_test_page=state.include_color_test_page,
     )
     state.pdf_ready = True
     store.save_session(state)

@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
+
+from color_book_generator.config import PageSizeName, ProcessingConfig
+from color_book_generator.presets import StylePreset
+from color_book_generator.story import StoryMode
+
+ID_PATTERN = r"^[a-f0-9]{8,32}$"
+ID_RE = re.compile(ID_PATTERN)
 
 
 def _default_web_root() -> Path:
@@ -25,6 +33,7 @@ def _default_web_root() -> Path:
 WEB_ROOT = _default_web_root()
 
 PageStatus = Literal["pending", "generating", "done", "error"]
+SheetStatus = Literal["empty", "generating", "ready", "error"]
 
 
 def _drop_nulls(data: object) -> object:
@@ -52,8 +61,29 @@ class BookSettings(BaseModel):
         return _drop_nulls(data)
 
 
+class BookCharacter(BaseModel):
+    id: str = Field(pattern=ID_PATTERN)
+    name: str
+    description: str = ""
+    approved: bool = False
+    sheet_status: SheetStatus = "empty"
+    error: str | None = None
+    created_at: datetime = Field(default_factory=datetime.now)
+    updated_at: datetime | None = None
+
+    @property
+    def filename(self) -> str:
+        return f"{self.id}.png"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_nulls(cls, data: Any) -> Any:
+        return _drop_nulls(data)
+
+
 class PageState(BaseModel):
     index: int
+    title: str = ""
     prompt: str
     caption_text: str = ""
     character_ids: list[str] = Field(default_factory=list)
@@ -71,7 +101,7 @@ class PageState(BaseModel):
 
 
 class SessionState(BaseModel):
-    id: str
+    id: str = Field(pattern=ID_PATTERN)
     created_at: datetime = Field(default_factory=datetime.now)
     title: str
     context_prompt: str
@@ -86,6 +116,23 @@ class SessionState(BaseModel):
     caption_font_bold: bool = False
     caption_font_size: float = 0.032
 
+    # Multi-category & 4-stage pipeline metadata
+    language: str = "en"
+    preset_id: str | None = None
+    category: str = "cozy"
+    page_size: PageSizeName = "letter_8.5x11"
+    negative_prompt: str = ""
+    processing: ProcessingConfig | None = None
+    characters: list[BookCharacter] = Field(default_factory=list)
+    story_mode: StoryMode = "narrative"
+    story_premise: str = ""
+    story_synopsis: str = ""
+    blank_verso: bool = False
+    include_title_page: bool = True
+    include_belongs_to_page: bool = False
+    include_color_test_page: bool = False
+    current_step: int = 1
+
     @model_validator(mode="before")
     @classmethod
     def _coerce_nulls(cls, data: Any) -> Any:
@@ -93,13 +140,45 @@ class SessionState(BaseModel):
 
 
 class CharacterRecord(BaseModel):
-    id: str
+    id: str = Field(pattern=ID_PATTERN)
     name: str
+    description: str = ""
     created_at: datetime = Field(default_factory=datetime.now)
 
     @property
     def filename(self) -> str:
         return f"{self.id}.png"
+
+
+def presets_file() -> Path:
+    return WEB_ROOT / "presets.json"
+
+
+def load_custom_presets() -> list[StylePreset]:
+    path = presets_file()
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    items: list[StylePreset] = []
+    for entry in raw if isinstance(raw, list) else []:
+        try:
+            preset = StylePreset.model_validate(entry)
+            preset.builtin = False
+            items.append(preset)
+        except ValueError:
+            continue
+    return items
+
+
+def save_custom_presets(items: list[StylePreset]) -> None:
+    WEB_ROOT.mkdir(parents=True, exist_ok=True)
+    presets_file().write_text(
+        json.dumps([item.model_dump(mode="json") for item in items], indent=2),
+        encoding="utf-8",
+    )
 
 
 def style_dir() -> Path:
@@ -117,6 +196,29 @@ def load_style_bytes() -> bytes | None:
 
 def clear_style() -> None:
     style_path().unlink(missing_ok=True)
+
+
+def session_style_dir(sid: str) -> Path:
+    return session_dir(sid) / "style"
+
+
+def session_style_path(sid: str) -> Path:
+    return session_style_dir(sid) / "reference.png"
+
+
+def load_session_style_bytes(sid: str) -> bytes | None:
+    path = session_style_path(sid)
+    if path.exists():
+        return path.read_bytes()
+    return load_style_bytes()
+
+
+def clear_session_style(sid: str) -> None:
+    session_style_path(sid).unlink(missing_ok=True)
+
+
+def session_characters_dir(sid: str) -> Path:
+    return session_dir(sid) / "characters"
 
 
 def characters_dir() -> Path:
@@ -212,6 +314,18 @@ def create_session(
     caption_font_family: Literal["sans", "serif", "mono"] = "sans",
     caption_font_bold: bool = False,
     caption_font_size: float = 0.032,
+    language: str = "en",
+    preset_id: str | None = None,
+    category: str = "cozy",
+    page_size: PageSizeName = "letter_8.5x11",
+    negative_prompt: str = "",
+    processing: ProcessingConfig | None = None,
+    story_mode: StoryMode = "narrative",
+    story_premise: str = "",
+    blank_verso: bool = False,
+    include_title_page: bool = True,
+    include_belongs_to_page: bool = False,
+    include_color_test_page: bool = False,
 ) -> SessionState:
     sid = new_session_id()
     state = SessionState(
@@ -227,8 +341,27 @@ def create_session(
         caption_font_family=caption_font_family,
         caption_font_bold=caption_font_bold,
         caption_font_size=caption_font_size,
+        language=language,
+        preset_id=preset_id,
+        category=category,
+        page_size=page_size,
+        negative_prompt=negative_prompt,
+        processing=processing,
+        story_mode=story_mode,
+        story_premise=story_premise,
+        blank_verso=blank_verso,
+        include_title_page=include_title_page,
+        include_belongs_to_page=include_belongs_to_page,
+        include_color_test_page=include_color_test_page,
     )
-    for d in (session_dir(sid), pages_dir(sid), raw_dir(sid), preview_dir(sid)):
+    for d in (
+        session_dir(sid),
+        pages_dir(sid),
+        raw_dir(sid),
+        preview_dir(sid),
+        session_characters_dir(sid),
+        session_style_dir(sid),
+    ):
         d.mkdir(parents=True, exist_ok=True)
     save_session(state)
     return state
