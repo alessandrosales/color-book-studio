@@ -23,7 +23,7 @@ const CATEGORY_LABEL = {
 const state = {
   presets: [],
   categories: [],
-  selectedPresetId: "bold_easy_cozy",
+  selectedPresetId: "kids_storybook",
   books: [],
   selectedBookIds: new Set(),
   filterCategory: "all",

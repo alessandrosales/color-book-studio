@@ -403,6 +403,36 @@ _BUILTIN_PRESETS: list[StylePreset] = [
     ),
     # ---------------------------------------------------------------- Kids
     _style(
+        id="kids_storybook",
+        name="Historinha para colorir",
+        category="kids",
+        badge="Padrão",
+        tagline="Uma história contada página a página: cena ilustrada e a frase da história embaixo.",
+        context=(
+            "Children's storybook coloring page for ages 3 to 8. Cute rounded cartoon style: the main "
+            "character has big glossy expressive eyes with a small catchlight, soft wavy hair or mane, "
+            "a clear emotion that matches the moment of the story. One full illustrated scene per page, "
+            "the character large and centered, framed by a charming environment (big trees, mushrooms, "
+            "flowers, meadows, mountains, clouds, rainbows, small animals) drawn with smooth clean "
+            "medium-weight outlines and large open areas easy to color. Keep the lower part of the "
+            "page clear and white so a story sentence can be printed below the illustration."
+        ),
+        concept=(
+            "A heartwarming picture-book story with one main character and a gentle lesson "
+            "(belonging, courage, friendship, being yourself). Each page is one beat of the story: "
+            "write the page as 'Page N — Title', then 'Story:' with two to five short sentences of "
+            "narration and dialogue, then 'Illustration:' describing the single scene. The caption is "
+            "one short line of dialogue or narration from that page. The final page closes the story "
+            "with 'The End' and a short moral."
+        ),
+        mode="narrative",
+        cast=1,
+        threshold="adaptive",
+        denoise=False,
+        min_px=12,
+        caption=_cap(True, "caption", "sans", False, 0.032),
+    ),
+    _style(
         id="kids_classic",
         name="Clássico infantil",
         category="kids",
