@@ -22,6 +22,7 @@ ARCHIVE_VERSION = 1
 MANIFEST_NAME = "manifest.json"
 MAX_FILE_BYTES = 120 * 1024 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
+SKIP_FAKE_SESSIONS = True
 
 
 class ArchiveError(RuntimeError):
@@ -38,6 +39,8 @@ class ImportResult(BaseModel):
     characters: int
     style: bool
     latest_session: str | None = None
+    session_ids: list[str] = []
+    skipped: int = 0
 
 
 def export_archive(destination: Path) -> Path:
@@ -201,8 +204,15 @@ def _load_config(source: Path) -> BookConfig | None:
         raise ArchiveError("book.yaml invalido no backup") from exc
 
 
-def _load_sessions(source: Path) -> list[tuple[store.SessionState, Path]]:
+def _is_test_session(state: store.SessionState) -> bool:
+    return state.provider == "fake" or state.model == "fake-1"
+
+
+def _load_sessions(
+    source: Path,
+) -> tuple[list[tuple[store.SessionState, Path]], int]:
     sessions: list[tuple[store.SessionState, Path]] = []
+    skipped = 0
     for directory in sorted(source.iterdir()):
         if not directory.is_dir():
             continue
@@ -219,23 +229,46 @@ def _load_sessions(source: Path) -> list[tuple[store.SessionState, Path]]:
             raise ArchiveError(
                 f"session.json invalido em {directory.name}"
             ) from exc
+        if SKIP_FAKE_SESSIONS and _is_test_session(state):
+            skipped += 1
+            continue
         sessions.append((state, directory))
-    return sessions
+    return sessions, skipped
+
+
+def session_activity(state: store.SessionState) -> datetime:
+    stamps = [state.created_at]
+    stamps.extend(
+        page.updated_at for page in state.pages if page.updated_at is not None
+    )
+    return max(stamps)
+
+
+def _session_rank(state: store.SessionState) -> tuple[bool, datetime]:
+    has_images = any(page.status == "done" for page in state.pages)
+    return (has_images, session_activity(state))
 
 
 def _merge_sessions(
     sessions: list[tuple[store.SessionState, Path]], result: ImportResult
 ) -> None:
-    latest_created = None
+    best_rank: tuple[bool, datetime] | None = None
     for state, directory in sessions:
+        if store.session_dir(state.id).exists():
+            # A book with this id already exists: import it as a new copy.
+            new_id = store.new_session_id()
+            while store.session_dir(new_id).exists():
+                new_id = store.new_session_id()
+            state = state.model_copy(update={"id": new_id})
         destination = store.session_dir(state.id)
-        if destination.exists():
-            shutil.rmtree(destination)
         shutil.copytree(directory, destination)
+        store.save_session(state)
         result.sessions += 1
         result.pages += len(state.pages)
-        if latest_created is None or state.created_at > latest_created:
-            latest_created = state.created_at
+        result.session_ids.append(state.id)
+        rank = _session_rank(state)
+        if best_rank is None or rank > best_rank:
+            best_rank = rank
             result.latest_session = state.id
 
 
@@ -247,7 +280,8 @@ def import_archive(archive: BinaryIO) -> ImportResult:
         archive.seek(0)
         _extract(archive, extracted)
 
-        sessions = _load_sessions(extracted)
+        sessions, skipped = _load_sessions(extracted)
+        result.skipped = skipped
         characters = _load_characters(extracted)
         settings = _load_settings(extracted)
         config = _load_config(extracted)

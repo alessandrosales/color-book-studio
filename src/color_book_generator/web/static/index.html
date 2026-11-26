@@ -20,7 +20,12 @@
         <span class="brand-name">Color Book Studio</span>
       </div>
       <div class="meta" id="meta"></div>
+      <label class="session-switch">
+        <span>Sessão</span>
+        <select id="session-select" aria-label="Trocar de sessão"></select>
+      </label>
       <div class="topbar-actions">
+        <a class="btn btn-ghost" href="/">Livros</a>
         <button class="btn btn-ghost" id="compose-btn" disabled>Gerar PDF</button>
         <a class="btn btn-primary is-hidden" id="pdf-link" href="#" target="_blank" rel="noopener">Abrir PDF</a>
       </div>
@@ -112,9 +117,9 @@
           </div>
           <div class="panel-actions">
             <button class="btn btn-outline" id="save-context">Salvar padrões</button>
-            <button class="btn btn-ghost" id="new-session">Nova sessão</button>
+            <button class="btn btn-ghost" id="new-session">Novo livro</button>
           </div>
-          <p class="hint panel-footnote">Nova sessão recomeça a lista usando estes padrões.</p>
+          <p class="hint panel-footnote">Cria um novo livro usando estes padrões.</p>
           <p class="saved" id="saved-note"></p>
         </div>
 

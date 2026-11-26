@@ -48,6 +48,8 @@ def test_meta_lists_features() -> None:
     body = client.get("/api/meta").json()
     assert "characters" in body["features"]
     assert "lightbox" in body["features"]
+    assert "sessions-list" in body["features"]
+    assert "multi-book" in body["features"]
     assert body["version"]
 
 
@@ -412,6 +414,9 @@ def test_patch_caption_font_settings() -> None:
 def test_export_import_roundtrip(monkeypatch, tmp_path) -> None:
     from color_book_generator.web import archive as backup_archive
 
+    monkeypatch.setattr(backup_archive, "SKIP_FAKE_SESSIONS", False)
+    from color_book_generator.web import archive as backup_archive
+
     config_path = tmp_path / "config" / "book.yaml"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
@@ -470,6 +475,7 @@ def test_export_import_roundtrip(monkeypatch, tmp_path) -> None:
     assert body["characters"] == 1
     assert body["style"] is True
     assert body["latest_session"] == sid
+    assert sid in body["session_ids"]
 
     settings = client.get("/api/settings").json()
     assert settings["title"] == "Backup Book"
@@ -575,3 +581,155 @@ def test_import_tolerates_null_caption_settings(monkeypatch, tmp_path) -> None:
     assert settings["caption_font_family"] == "sans"
     assert settings["caption_font_bold"] is False
     assert settings["caption_font_size"] == 0.032
+
+
+def test_import_latest_session_uses_activity(monkeypatch, tmp_path) -> None:
+    from color_book_generator.web import archive as backup_archive
+
+    monkeypatch.setattr(backup_archive, "SKIP_FAKE_SESSIONS", False)
+    older = client.post(
+        "/api/sessions",
+        json={"pages": 1, "provider": "fake", "model": "fake-1", "title": "Older"},
+    ).json()
+    newer = client.post(
+        "/api/sessions",
+        json={"pages": 1, "provider": "fake", "model": "fake-1", "title": "Newer"},
+    ).json()
+    # Generate on the older session after the newer one was created.
+    client.post(
+        f"/api/sessions/{older['id']}/pages/1/generate", json={"provider": "fake"}
+    )
+    exported = client.get("/api/export").content
+
+    monkeypatch.setattr(store, "WEB_ROOT", tmp_path / "restored")
+    imported = client.post(
+        "/api/import",
+        files={"archive": ("backup.zip", exported, "application/zip")},
+    ).json()
+    assert imported["latest_session"] == older["id"]
+    assert set(imported["session_ids"]) == {older["id"], newer["id"]}
+
+
+def test_home_and_book_routes() -> None:
+    home = client.get("/")
+    assert home.status_code == 200
+    assert "Seus livros" in home.text
+
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    editor = client.get(f"/books/{session['id']}")
+    assert editor.status_code == 200
+    assert "Color Book Studio" in editor.text
+
+    missing = client.get("/books/does-not-exist", follow_redirects=False)
+    assert missing.status_code == 302
+    assert missing.headers["location"] == "/"
+
+
+def test_sessions_list_orders_by_activity() -> None:
+    first = client.post(
+        "/api/sessions",
+        json={"pages": 2, "provider": "fake", "model": "fake-1", "title": "Alpha"},
+    ).json()
+    second = client.post(
+        "/api/sessions",
+        json={"pages": 1, "provider": "fake", "model": "fake-1", "title": "Beta"},
+    ).json()
+    client.post(
+        f"/api/sessions/{first['id']}/pages/1/generate", json={"provider": "fake"}
+    )
+    summaries = client.get("/api/sessions").json()
+    assert [s["title"] for s in summaries[:2]] == ["Alpha", "Beta"]
+    assert summaries[0]["done"] == 1
+    assert summaries[0]["pages"] == 2
+    assert summaries[0]["cover_url"]
+    assert second["id"] in [s["id"] for s in summaries]
+
+
+def test_import_latest_session_skips_newer_empty(monkeypatch, tmp_path) -> None:
+    from color_book_generator.web import archive as backup_archive
+
+    monkeypatch.setattr(backup_archive, "SKIP_FAKE_SESSIONS", False)
+    book = client.post(
+        "/api/sessions",
+        json={"pages": 2, "provider": "fake", "model": "fake-1", "title": "Book"},
+    ).json()
+    client.post(
+        f"/api/sessions/{book['id']}/pages/1/generate", json={"provider": "fake"}
+    )
+    client.post(
+        "/api/sessions",
+        json={"pages": 2, "provider": "fake", "model": "fake-1", "title": "Empty"},
+    )
+    exported = client.get("/api/export").content
+    monkeypatch.setattr(store, "WEB_ROOT", tmp_path / "restored")
+    imported = client.post(
+        "/api/import",
+        files={"archive": ("backup.zip", exported, "application/zip")},
+    ).json()
+    assert imported["latest_session"] == book["id"]
+
+
+def test_delete_session_endpoint() -> None:
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    sid = session["id"]
+    assert client.delete(f"/api/sessions/{sid}").status_code == 204
+    assert client.get(f"/api/sessions/{sid}").status_code == 404
+    assert sid not in [item["id"] for item in client.get("/api/sessions").json()]
+
+
+def test_import_skips_fake_sessions(monkeypatch, tmp_path) -> None:
+
+    fake = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+    ).json()
+    real = client.post(
+        "/api/sessions",
+        json={"pages": 1, "provider": "codex", "model": "gpt-6.2-sol"},
+    ).json()
+    exported = client.get("/api/export").content
+
+    monkeypatch.setattr(store, "WEB_ROOT", tmp_path / "restored")
+    imported = client.post(
+        "/api/import",
+        files={"archive": ("backup.zip", exported, "application/zip")},
+    ).json()
+    assert imported["sessions"] == 1
+    assert imported["skipped"] == 1
+    assert imported["session_ids"] == [real["id"]]
+    assert fake["id"] != imported["latest_session"]
+
+
+def test_import_creates_copy_when_book_exists(monkeypatch) -> None:
+    from color_book_generator.web import archive as backup_archive
+
+    monkeypatch.setattr(backup_archive, "SKIP_FAKE_SESSIONS", False)
+    session = client.post(
+        "/api/sessions",
+        json={"pages": 1, "provider": "fake", "model": "fake-1", "title": "Dup"},
+    ).json()
+    client.post(
+        f"/api/sessions/{session['id']}/pages/1/generate", json={"provider": "fake"}
+    )
+    exported = client.get("/api/export").content
+
+    # Import into the same workspace: id already exists.
+    imported = client.post(
+        "/api/import",
+        files={"archive": ("backup.zip", exported, "application/zip")},
+    ).json()
+    assert imported["sessions"] == 1
+    new_id = imported["session_ids"][0]
+    assert new_id != session["id"]
+    assert imported["latest_session"] == new_id
+
+    original = client.get(f"/api/sessions/{session['id']}")
+    copy = client.get(f"/api/sessions/{new_id}")
+    assert original.status_code == 200
+    assert copy.status_code == 200
+    assert copy.json()["title"] == "Dup"
+    assert copy.json()["pages"][0]["status"] == "done"
+    assert client.get(copy.json()["pages"][0]["view_url"]).status_code == 200

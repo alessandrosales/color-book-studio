@@ -6,13 +6,14 @@ import asyncio
 import io
 import os
 import re
+import shutil
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel, Field
@@ -134,6 +135,17 @@ class DefaultsView(BaseModel):
     caption_font_family: str
     caption_font_bold: bool
     caption_font_size: float
+
+
+class SessionSummary(BaseModel):
+    id: str
+    title: str
+    pages: int
+    done: int
+    updated_at: datetime
+    provider: str
+    model: str
+    cover_url: str | None
 
 
 class CodexModels(BaseModel):
@@ -513,7 +525,14 @@ def delete_character(cid: str) -> None:
 
 
 @app.get("/", include_in_schema=False)
-def index() -> FileResponse:
+def home() -> FileResponse:
+    return FileResponse(STATIC_DIR / "home.html")
+
+
+@app.get("/books/{sid}", include_in_schema=False)
+def book_editor(sid: str) -> Response:
+    if not SID_RE.match(sid) or store.load_session(sid) is None:
+        return RedirectResponse("/", status_code=302)
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -524,6 +543,8 @@ API_FEATURES = [
     "codex-models",
     "lightbox",
     "backup",
+    "sessions-list",
+    "multi-book",
 ]
 
 
@@ -687,6 +708,48 @@ def create_session(body: SessionCreate) -> SessionView:
     _normalize_provider(state)
     store.save_session(state)
     return _session_view(state)
+
+
+@app.get("/api/sessions", response_model=list[SessionSummary])
+def list_sessions() -> list[SessionSummary]:
+    summaries: list[SessionSummary] = []
+    if not store.WEB_ROOT.exists():
+        return summaries
+    for directory in store.WEB_ROOT.iterdir():
+        if not directory.is_dir() or not SID_RE.match(directory.name):
+            continue
+        state = store.load_session(directory.name)
+        if state is None:
+            continue
+        done_pages = [page for page in state.pages if page.status == "done"]
+        cover = done_pages[0] if done_pages else None
+        summaries.append(
+            SessionSummary(
+                id=state.id,
+                title=state.title,
+                pages=len(state.pages),
+                done=len(done_pages),
+                updated_at=backup_archive.session_activity(state),
+                provider=state.provider,
+                model=state.model,
+                cover_url=(
+                    f"/api/sessions/{state.id}/pages/{cover.index}/view"
+                    f"?v={int((cover.updated_at or state.created_at).timestamp())}"
+                    if cover is not None
+                    else None
+                ),
+            )
+        )
+    summaries.sort(
+        key=lambda item: (item.done > 0, item.updated_at), reverse=True
+    )
+    return summaries
+
+
+@app.delete("/api/sessions/{sid}", status_code=204)
+def delete_session(sid: str) -> None:
+    state = _session(sid)
+    shutil.rmtree(store.session_dir(state.id), ignore_errors=True)
 
 
 @app.get("/api/sessions/{sid}", response_model=SessionView)

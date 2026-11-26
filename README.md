@@ -22,6 +22,11 @@ uv sync --extra web --extra openai   # extra web uma vez
 uv run cbg web                       # http://127.0.0.1:8000
 ```
 
+A raiz (`/`) é a **biblioteca de livros**: cada livro guarda contexto, páginas,
+personagens, estilo e padrões próprios. Abrir um livro vai para `/books/<id>`.
+O seletor **Sessão** no topo alterna entre livros; “Novo livro” cria outro sem
+afetar o atual.
+
 - **Padrões da página**: prompt de contexto aplicado a todas as imagens (estilo,
   traço, fundo, composição). Editável; salvo na sessão.
 - **Prompt por página**: cada página tem seu próprio prompt (assunto/composição),
@@ -52,7 +57,8 @@ uv run cbg web                       # http://127.0.0.1:8000
   `raw/`, páginas, `previews/`, `book.pdf`), personagens, estilo, `settings.json`
   e `config/book.yaml`. A importação valida tudo antes de escrever (sem estado
   parcial), aceita zips antigos/sem manifest e mostra uma tela de progresso.
-  Sessões substituem as de mesmo id; personagens são mesclados por id; o
+  Se o mesmo livro (id) já existir, a importação cria uma **nova cópia** com outro
+  id em vez de sobrescrever; personagens são mesclados por id; o
   `book.yaml` restaurado mantém geometria/margens/DPI. Credenciais não entram.
 - Sessões são persistidas em `output/web/<id>/` (`session.json`, `pages/`, `raw/`,
   `previews/`, `book.pdf`), então recarregar a página retoma a mesma sessão.

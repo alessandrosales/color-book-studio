@@ -1,5 +1,9 @@
 const $ = (sel) => document.querySelector(sel);
-const STORAGE_KEY = "cbg.session";
+
+function pathSessionId() {
+  const match = window.location.pathname.match(/^\/books\/([a-f0-9]{8,32})$/);
+  return match ? match[1] : null;
+}
 
 const STATUS_LABEL = {
   pending: "pendente",
@@ -16,6 +20,7 @@ const state = {
   codexModels: [],
   settings: null,
   characters: [],
+  sessions: [],
   styleUrl: null,
   codexTimer: null,
 };
@@ -121,14 +126,13 @@ async function createSession(pages, title) {
     caption_position: $("#caption-position").value,
     caption_font_family: $("#caption-font").value,
     caption_font_bold: $("#caption-weight").value === "bold",
-    caption_font_size: Number($("#caption-size").value),
+    caption_font_size: Number($("#caption-size").value) || 0.032,
   };
   const session = await api("/api/sessions", {
     method: "POST",
     body: JSON.stringify(body),
   });
-  localStorage.setItem(STORAGE_KEY, session.id);
-  state.session = session;
+  window.location.href = `/books/${session.id}`;
   return session;
 }
 
@@ -238,6 +242,34 @@ function updateCaptionFields() {
     select.disabled = !enabled;
   }
   $("#page-list").classList.toggle("captions-off", !enabled);
+}
+
+async function loadSessions() {
+  try {
+    state.sessions = await api("/api/sessions");
+  } catch (_) {
+    state.sessions = [];
+  }
+  renderSessionOptions();
+}
+
+function renderSessionOptions() {
+  const select = $("#session-select");
+  select.innerHTML = "";
+  const current = state.session ? state.session.id : null;
+  for (const summary of state.sessions) {
+    const option = document.createElement("option");
+    option.value = summary.id;
+    option.textContent = `${summary.title} · ${summary.done}/${summary.pages}`;
+    select.appendChild(option);
+  }
+  if (current && !state.sessions.some((item) => item.id === current)) {
+    const option = document.createElement("option");
+    option.value = current;
+    option.textContent = state.session ? state.session.title : current;
+    select.appendChild(option);
+  }
+  if (current) select.value = current;
 }
 
 async function loadStyle() {
@@ -757,6 +789,7 @@ async function generatePage(index) {
   } finally {
     setBusy(index, false);
     render();
+    loadSessions();
   }
 }
 
@@ -875,13 +908,17 @@ async function importBackup() {
     if (xhr.status >= 200 && xhr.status < 300) {
       const result = xhr.response || {};
       busyProgress(100, "Importação concluída");
+      const skipped = result.skipped
+        ? ` · ${result.skipped} de teste ignoradas`
+        : "";
       $("#busy-sub").textContent =
         `${result.sessions || 0} sessões · ${result.pages || 0} páginas · ` +
-        `${result.characters || 0} personagens`;
-      if (result.latest_session) {
-        localStorage.setItem(STORAGE_KEY, result.latest_session);
-      }
-      setTimeout(() => window.location.reload(), 900);
+        `${result.characters || 0} personagens${skipped}`;
+      const target = result.latest_session;
+      setTimeout(() => {
+        if (target) window.location.href = `/books/${target}`;
+        else window.location.reload();
+      }, 900);
     } else {
       const body = xhr.response || {};
       hideBusy();
@@ -1080,6 +1117,12 @@ function bind() {
     else if (event.key === "ArrowRight") navigateLightbox(1);
   });
 
+  $("#session-select").addEventListener("change", (event) => {
+    const value = event.target.value;
+    if (!value) return;
+    window.location.href = `/books/${value}`;
+  });
+
   $("#import-btn").addEventListener("click", importBackup);
 
   $("#style-upload").addEventListener("click", uploadStyle);
@@ -1124,8 +1167,6 @@ function bind() {
     try {
       await saveSettings(true);
       await createSession(count, $("#session-title").value);
-      toast("Nova sessão criada com estes padrões.");
-      render();
     } catch (err) {
       toast(err.message || "Falha ao criar sessão", true);
     }
@@ -1139,7 +1180,9 @@ async function checkServerVersion() {
     const ok =
       features.includes("characters") &&
       features.includes("lightbox") &&
-      features.includes("backup");
+      features.includes("backup") &&
+      features.includes("sessions-list") &&
+      features.includes("multi-book");
     $("#server-banner").classList.toggle("is-hidden", ok);
   } catch (_) {
     $("#server-banner").classList.remove("is-hidden");
@@ -1179,15 +1222,18 @@ async function boot() {
   setSelectValue($("#caption-size"), eff.caption_font_size || 0.032);
   updateCaptionFields();
 
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved) {
-    try {
-      state.session = await api(`/api/sessions/${saved}`);
-    } catch (_) {
-      localStorage.removeItem(STORAGE_KEY);
-    }
+  const sessionId = pathSessionId();
+  if (!sessionId) {
+    window.location.replace("/");
+    return;
   }
-  if (state.session && !state.settings) {
+  try {
+    state.session = await api(`/api/sessions/${sessionId}`);
+  } catch (_) {
+    window.location.replace("/");
+    return;
+  }
+  if (!state.settings) {
     state.settings = {
       title: state.session.title,
       pages: state.session.pages.length,
@@ -1208,13 +1254,7 @@ async function boot() {
       });
     } catch (_) {}
   }
-  if (!state.session) {
-    try {
-      await createSession(eff.pages, eff.title);
-    } catch (err) {
-      toast(err.message || "Falha ao criar sessão", true);
-    }
-  } else if (
+  if (
     state.codex &&
     state.codex.authenticated &&
     !state.defaults.openai_configured &&
@@ -1224,6 +1264,7 @@ async function boot() {
       await useCodexProvider();
     } catch (_) {}
   }
+  await loadSessions();
   render();
 }
 
