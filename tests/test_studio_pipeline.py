@@ -750,3 +750,102 @@ def test_insert_contextual_page_bridges_neighbors_and_shifts_files(
     assert refreshed["pages"][1]["status"] == "pending"
     assert refreshed["pages"][2]["status"] == "done"
     assert refreshed["pages"][2]["preview_url"] is not None
+
+
+def test_autopilot_cancel_and_resume_from_where_it_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    from color_book_generator import story as story_mod
+    from color_book_generator.web.routers import studio as studio_mod
+
+    blueprint_calls = 0
+
+    def _fake_blueprint(**_kwargs: object) -> story_mod.FullBookBlueprint:
+        nonlocal blueprint_calls
+        blueprint_calls += 1
+        return story_mod.FullBookBlueprint(
+            title="Aventura em Kyoto",
+            premise="Dois estudantes em Kyoto",
+            synopsis="Uma jornada por templos e ruas chuvosas.",
+            mode="narrative",
+            style_anchor_subject="two manga students in Kyoto",
+            characters=[
+                story_mod.GeneratedCharacter(name="Mio", description="Garota de cabelo ondulado")
+            ],
+            pages=[
+                story_mod.ScriptedPage(index=1, title="P1", scene_prompt="Scene 1", caption_text="Oi!", character_names=["Mio"]),
+                story_mod.ScriptedPage(index=2, title="P2", scene_prompt="Scene 2", caption_text="Vamos!", character_names=["Mio"]),
+                story_mod.ScriptedPage(index=3, title="P3", scene_prompt="Scene 3", caption_text="Fim!", character_names=["Mio"]),
+            ],
+        )
+
+    monkeypatch.setattr(studio_mod, "generate_full_book_blueprint", _fake_blueprint)
+
+    generated_prompts: list[str] = []
+    original_gen = studio_mod.generate_matching
+    cancel_triggered = False
+
+    session = client.post(
+        "/api/sessions",
+        json={"pages": 3, "provider": "fake", "model": "fake-1", "preset_id": "manga_shoujo"},
+    ).json()
+    sid = session["id"]
+
+    def _spy_generate_matching(provider, prompt, **kwargs):
+        nonlocal cancel_triggered
+        generated_prompts.append(prompt)
+        img = original_gen(provider, prompt, **kwargs)
+        # Cancel immediately after Page 1 is generated
+        if "Page 1 of 3." in prompt and not cancel_triggered:
+            cancel_triggered = True
+            studio_mod._autopilot_cancel.add(sid)
+        return img
+
+    monkeypatch.setattr(studio_mod, "generate_matching", _spy_generate_matching)
+
+    res = client.post(
+        f"/api/sessions/{sid}/autopilot",
+        json={"pages": 3, "language": "pt", "stop_after": "pdf"},
+    )
+    assert res.status_code == 202, res.text
+
+    # Wait until autopilot stops in cancelled state
+    status: dict[str, object] = {}
+    for _ in range(100):
+        status = client.get(f"/api/sessions/{sid}/autopilot").json()
+        if status["status"] != "running":
+            break
+        time.sleep(0.05)
+
+    assert status["status"] == "cancelled", status
+    assert blueprint_calls == 1
+    mid_session = client.get(f"/api/sessions/{sid}").json()
+    assert [p["status"] for p in mid_session["pages"]] == ["done", "pending", "pending"]
+    assert mid_session["characters"][0]["sheet_status"] == "ready"
+    prompts_before_resume = len(generated_prompts)
+
+    # Resume from where it stopped: should NOT re-run blueprint, anchor, sheet, or page 1
+    resumed = client.post(
+        f"/api/sessions/{sid}/autopilot",
+        json={"pages": 3, "language": "pt", "stop_after": "pdf", "resume": True},
+    )
+    assert resumed.status_code == 202, resumed.text
+
+    for _ in range(100):
+        status = client.get(f"/api/sessions/{sid}/autopilot").json()
+        if status["status"] != "running":
+            break
+        time.sleep(0.05)
+
+    assert status["status"] == "done", status
+    assert blueprint_calls == 1  # Blueprint was NOT regenerated!
+    resumed_prompts = generated_prompts[prompts_before_resume:]
+    assert len(resumed_prompts) == 2  # Only Page 2 and Page 3!
+    assert "Page 2 of 3." in resumed_prompts[0]
+    assert "Page 3 of 3." in resumed_prompts[1]
+
+    final_session = client.get(f"/api/sessions/{sid}").json()
+    assert [p["status"] for p in final_session["pages"]] == ["done", "done", "done"]
+    assert final_session["pdf_ready"] is True

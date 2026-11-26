@@ -1121,17 +1121,42 @@ function closeLightbox() {
 }
 
 /* ==================== AUTOPILOT POLLING ==================== */
+function sessionHasResumableProgress() {
+  const s = state.session;
+  if (!s) return false;
+  const hasBlueprint =
+    Boolean(s.story_synopsis && s.story_synopsis.trim()) ||
+    s.characters.length > 0 ||
+    s.pages.some((p) => p.status === "done" || (p.title && p.title.trim()));
+  if (!hasBlueprint) return false;
+  const pendingSheets = s.characters.some((c) => c.sheet_status !== "ready");
+  const pendingPages = s.pages.some((p) => p.status !== "done");
+  return pendingSheets || pendingPages || !s.pdf_ready;
+}
+
 function renderAutopilot(st) {
   const bar = $("#autopilot-bar");
-  const isVisible = st && st.status && st.status !== "idle";
+  const isVisible = st && st.status && st.status !== "idle" && st.status !== "done";
   bar.classList.toggle("is-hidden", !isVisible);
+
+  const running = Boolean(st && st.status === "running");
+  const canResumeStatus = Boolean(st && (st.status === "cancelled" || st.status === "error"));
+  const resumeCardBtn = $("#autopilot-resume-btn");
+  if (resumeCardBtn) {
+    resumeCardBtn.classList.toggle("is-hidden", running || (!canResumeStatus && !sessionHasResumableProgress()));
+    resumeCardBtn.disabled = running;
+  }
+
+  $("#autopilot-full-btn").disabled = running;
+  $("#autopilot-plan-btn").disabled = running;
+
   if (!isVisible) return;
 
   const badge = $("#autopilot-badge");
   badge.classList.remove("pill-ok", "pill-warn", "pill-err");
   if (st.status === "running") {
     badge.classList.add("pill-warn");
-    badge.textContent = "Gerando com IA";
+    badge.textContent = st.cancelling ? "Cancelando…" : "Gerando com IA";
   } else if (st.status === "done") {
     badge.classList.add("pill-ok");
     badge.textContent = "Concluído";
@@ -1145,15 +1170,21 @@ function renderAutopilot(st) {
   $("#autopilot-label").textContent = st.label || "";
   $("#autopilot-pct").textContent = `${st.percent || 0}%`;
   $("#autopilot-fill").style.width = `${st.percent || 0}%`;
-  $("#autopilot-cancel").classList.toggle("is-hidden", st.status !== "running");
+
+  const cancelBtn = $("#autopilot-cancel");
+  cancelBtn.classList.toggle("is-hidden", !running);
+  cancelBtn.disabled = Boolean(st.cancelling);
+  cancelBtn.textContent = st.cancelling ? "Cancelando…" : "Cancelar";
+
+  const resumeBtn = $("#autopilot-resume");
+  if (resumeBtn) {
+    resumeBtn.classList.toggle("is-hidden", !canResumeStatus);
+    resumeBtn.disabled = running;
+  }
 
   const errEl = $("#autopilot-error");
   errEl.classList.toggle("is-hidden", !st.error);
   if (st.error) errEl.textContent = st.error;
-
-  const running = st.status === "running";
-  $("#autopilot-full-btn").disabled = running;
-  $("#autopilot-plan-btn").disabled = running;
 }
 
 async function pollAutopilot() {
@@ -1176,13 +1207,15 @@ async function pollAutopilot() {
         if (st.status === "done") {
           setStep(st.current_step || 4, { animate: true, persist: false });
           toast(st.label || "Geração automática concluída.");
+        } else if (st.status === "cancelled") {
+          toast("Geração cancelada. Você pode continuar de onde parou.");
         }
       }
     }
   } catch (_) {}
 }
 
-async function triggerAutopilot(stopAfter) {
+async function triggerAutopilot(stopAfter, { resume = false } = {}) {
   try {
     const saved = await saveStyleConfig({ silent: true });
     if (!saved) return;
@@ -1193,13 +1226,18 @@ async function triggerAutopilot(stopAfter) {
         premise_hint: $("#story-premise").value.trim(),
         language: $("#story-language")?.value || state.session.language || "en",
         stop_after: stopAfter,
+        resume,
       }),
     });
     renderAutopilot(st);
     if (!state.autopilotTimer) {
       state.autopilotTimer = setInterval(pollAutopilot, 1800);
     }
-    toast("Geração automática iniciada. Acompanhe o progresso acima.");
+    toast(
+      resume
+        ? "Retomando geração de onde parou…"
+        : "Geração automática iniciada. Acompanhe o progresso acima."
+    );
   } catch (err) {
     toast(err.message, true);
   }
@@ -1334,9 +1372,24 @@ function bindEvents() {
   $("#style-detect-btn").addEventListener("click", () => detectReferenceTypography());
   $("#autopilot-full-btn").addEventListener("click", () => triggerAutopilot("pdf"));
   $("#autopilot-plan-btn").addEventListener("click", () => triggerAutopilot("blueprint"));
+  $("#autopilot-resume")?.addEventListener("click", () => triggerAutopilot("pdf", { resume: true }));
+  $("#autopilot-resume-btn")?.addEventListener("click", () => triggerAutopilot("pdf", { resume: true }));
   $("#autopilot-cancel").addEventListener("click", async () => {
-    const st = await api(`/api/sessions/${state.sid}/autopilot/cancel`, { method: "POST" });
-    renderAutopilot(st);
+    try {
+      const btn = $("#autopilot-cancel");
+      btn.disabled = true;
+      btn.textContent = "Cancelando…";
+      const st = await api(`/api/sessions/${state.sid}/autopilot/cancel`, { method: "POST" });
+      renderAutopilot(st);
+      if (st.status === "running" && !state.autopilotTimer) {
+        state.autopilotTimer = setInterval(pollAutopilot, 1000);
+      } else if (st.status === "cancelled") {
+        await reloadSession();
+        toast("Geração cancelada. Você pode continuar de onde parou.");
+      }
+    } catch (err) {
+      toast(err.message, true);
+    }
   });
 
   // Save custom preset modal

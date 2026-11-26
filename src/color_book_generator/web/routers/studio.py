@@ -1291,6 +1291,7 @@ class AutopilotRequest(BaseModel):
     language: str = "en"
     mode: StoryMode | None = None
     stop_after: Literal["blueprint", "sheets", "pdf"] = "pdf"
+    resume: bool = False
 
 
 class AutopilotStatus(BaseModel):
@@ -1300,6 +1301,7 @@ class AutopilotStatus(BaseModel):
     percent: int = 0
     current_step: int = 1
     error: str | None = None
+    cancelling: bool = False
 
 
 _autopilot_status: dict[str, AutopilotStatus] = {}
@@ -1316,6 +1318,7 @@ def _set_autopilot(
     percent: int,
     current_step: int,
     error: str | None = None,
+    cancelling: bool = False,
 ) -> None:
     _autopilot_status[sid] = AutopilotStatus(
         status=status,
@@ -1324,7 +1327,44 @@ def _set_autopilot(
         percent=max(0, min(100, percent)),
         current_step=current_step,
         error=error,
+        cancelling=cancelling,
     )
+
+
+def _has_existing_blueprint(state: SessionState) -> bool:
+    """Return True if the session already has a planned story/cast/pages to resume."""
+    if state.story_synopsis.strip() or state.characters:
+        return True
+    return any(
+        p.status == "done" or p.title.strip() or p.caption_text.strip()
+        for p in state.pages
+    )
+
+
+
+
+def _reset_stuck_generating(state: SessionState) -> bool:
+    """Reset any 'generating' characters/pages so they can be cleanly resumed."""
+    changed = False
+    chars_dir = store.session_characters_dir(state.id)
+    for char in state.characters:
+        if char.sheet_status == "generating":
+            char.sheet_status = "ready" if (chars_dir / char.filename).exists() else "empty"
+            changed = True
+    pages_dir = store.pages_dir(state.id)
+    for page in state.pages:
+        if page.status == "generating":
+            fname = f"page-{page.index:03d}.png"
+            page.status = "done" if (pages_dir / fname).exists() else "pending"
+            changed = True
+    for extra in (*state.front_extra_pages, *state.back_extra_pages):
+        if extra.status == "generating":
+            extra.status = "pending"
+            changed = True
+    if state.cover_status == "generating":
+        state.cover_status = "done" if store.cover_path(state.id).exists() else "pending"
+        changed = True
+    return changed
 
 
 def _session_book_cfg(state: SessionState) -> BookConfig:
@@ -1396,82 +1436,109 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             normalize_codex_model(state.model) if provider_name == "codex" else state.model
         )
 
-        # Phase 1: Full Book Blueprint (Title, Synopsis, Cast, Style Anchor Subject, All Pages)
-        _set_autopilot(
-            sid,
-            status="running",
-            phase="blueprint",
-            label="Criando conceito, elenco e roteiro completo…",
-            percent=8,
-            current_step=1,
-        )
-        blueprint = await asyncio.to_thread(
-            generate_full_book_blueprint,
-            pages=target_pages,
-            preset=preset,
-            style_context=state.context_prompt,
-            premise_hint=req.premise_hint or state.story_premise,
-            mode=req.mode,
-            language=req.language,
-            provider=provider_name,
-            model=model_name,
-        )
+        def _is_cancelled() -> bool:
+            return sid in _autopilot_cancel
 
-        if sid in _autopilot_cancel:
+        def _finish_cancelled(phase: str, percent: int, step: int) -> None:
+            _reset_stuck_generating(state)
+            store.save_session(state)
             _set_autopilot(
-                sid, status="cancelled", phase="blueprint", label="Autopilot cancelado.", percent=10, current_step=1
+                sid,
+                status="cancelled",
+                phase=phase,
+                label="Geração cancelada. Você pode continuar de onde parou.",
+                percent=percent,
+                current_step=step,
             )
-            return
 
-        state.title = blueprint.title
-        state.language = req.language or "en"
-        state.story_premise = blueprint.premise
-        state.story_synopsis = blueprint.synopsis
-        state.story_mode = blueprint.mode
+        if req.resume and _reset_stuck_generating(state):
+            store.save_session(state)
 
-        # Register generated characters into this book
-        char_id_by_name: dict[str, str] = {}
-        new_characters: list[BookCharacter] = []
-        for gen_char in blueprint.characters:
-            cid = store.new_character_id()
-            char_id_by_name[gen_char.name.strip().lower()] = cid
-            new_characters.append(
-                BookCharacter(
-                    id=cid,
-                    name=gen_char.name,
-                    description=gen_char.description,
-                    approved=False,
-                    sheet_status="empty",
-                    updated_at=datetime.now(),
-                )
+        # Phase 1: Full Book Blueprint (skipped when resuming an existing plan)
+        anchor_subject = (
+            state.pages[0].prompt
+            if state.pages and state.pages[0].prompt.strip()
+            else (state.story_premise or state.title or "iconic showcase scene")
+        )
+        need_blueprint = not (req.resume and _has_existing_blueprint(state))
+        if need_blueprint:
+            if _is_cancelled():
+                _finish_cancelled("blueprint", 5, 1)
+                return
+            _set_autopilot(
+                sid,
+                status="running",
+                phase="blueprint",
+                label="Criando conceito, elenco e roteiro completo…",
+                percent=8,
+                current_step=1,
             )
-        state.characters = new_characters
+            blueprint = await asyncio.to_thread(
+                generate_full_book_blueprint,
+                pages=target_pages,
+                preset=preset,
+                style_context=state.context_prompt,
+                premise_hint=req.premise_hint or state.story_premise,
+                mode=req.mode,
+                language=req.language,
+                provider=provider_name,
+                model=model_name,
+            )
 
-        # Populate all pages with visual prompt, caption, and character links
-        all_char_ids = [c.id for c in state.characters]
-        state.pages = [
-            PageState(
-                index=p.index,
-                title=p.title,
-                prompt=p.scene_prompt,
-                caption_text=p.caption_text,
-                character_ids=(
-                    list(
-                        dict.fromkeys(
-                            char_id_by_name[n.lower()]
-                            for n in p.character_names
-                            if n.lower() in char_id_by_name
-                        )
+            if _is_cancelled():
+                _finish_cancelled("blueprint", 10, 1)
+                return
+
+            state.title = blueprint.title
+            state.language = req.language or "en"
+            state.story_premise = blueprint.premise
+            state.story_synopsis = blueprint.synopsis
+            state.story_mode = blueprint.mode
+            anchor_subject = blueprint.style_anchor_subject
+
+            # Register generated characters into this book
+            char_id_by_name: dict[str, str] = {}
+            new_characters: list[BookCharacter] = []
+            for gen_char in blueprint.characters:
+                cid = store.new_character_id()
+                char_id_by_name[gen_char.name.strip().lower()] = cid
+                new_characters.append(
+                    BookCharacter(
+                        id=cid,
+                        name=gen_char.name,
+                        description=gen_char.description,
+                        approved=False,
+                        sheet_status="empty",
+                        updated_at=datetime.now(),
                     )
-                    or all_char_ids
-                ),
-                status="pending",
-            )
-            for p in blueprint.pages
-        ]
-        state.pdf_ready = False
-        state.current_step = 3 if req.stop_after == "blueprint" else 1
-        store.save_session(state)
+                )
+            state.characters = new_characters
+
+            # Populate all pages with visual prompt, caption, and character links
+            all_char_ids = [c.id for c in state.characters]
+            state.pages = [
+                PageState(
+                    index=p.index,
+                    title=p.title,
+                    prompt=p.scene_prompt,
+                    caption_text=p.caption_text,
+                    character_ids=(
+                        list(
+                            dict.fromkeys(
+                                char_id_by_name[n.lower()]
+                                for n in p.character_names
+                                if n.lower() in char_id_by_name
+                            )
+                        )
+                        or all_char_ids
+                    ),
+                    status="pending",
+                )
+                for p in blueprint.pages
+            ]
+            state.pdf_ready = False
+            state.current_step = 3 if req.stop_after == "blueprint" else 1
+            store.save_session(state)
 
         if req.stop_after == "blueprint":
             _set_autopilot(
@@ -1493,44 +1560,66 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
         def _pct() -> int:
             return 15 + int((done_img_steps / max(1, total_img_steps)) * 80)
 
-        # Phase 2: Generate Style Anchor Image
-        _set_autopilot(
-            sid,
-            status="running",
-            phase="style_anchor",
-            label="Gerando âncora visual de estilo do livro…",
-            percent=_pct(),
-            current_step=1,
-        )
-        anchor_prompt = (
-            f"{state.context_prompt.strip()}\n\n"
-            f"Style anchor showcase subject: {blueprint.style_anchor_subject}."
-        )
-
-        def _gen_anchor() -> Image.Image:
-            provider = get_provider(provider_name, model_name)
-            img = generate_matching(
-                provider,
-                anchor_prompt,
-                target_size=(1024, 1024),
-                negative_prompt=cfg.negative_prompt,
-            )
-            return to_line_art(img, cfg.processing)
+        # Phase 2: Ensure Style Anchor Image (use built-in category reference directly when available)
+        if _is_cancelled():
+            _finish_cancelled("style_anchor", _pct(), 1)
+            return
 
         if not store.session_style_path(sid).exists():
-            anchor_img = await asyncio.to_thread(_gen_anchor)
-            store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
-            anchor_img.save(store.session_style_path(sid), "PNG")
-        done_img_steps += 1
-        style_bytes = store.session_style_path(sid).read_bytes()
-
-        # Phase 3: Generate Character Sheets
-        for idx, char in enumerate(state.characters, start=1):
-            if sid in _autopilot_cancel:
+            category_ref = store.load_page_layout_reference_bytes(
+                state.category, 1, preset_id=state.preset_id
+            )
+            if category_ref is not None:
+                store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
+                store.session_style_path(sid).write_bytes(category_ref)
+            else:
                 _set_autopilot(
-                    sid, status="cancelled", phase="sheets", label="Autopilot cancelado.", percent=_pct(), current_step=2
+                    sid,
+                    status="running",
+                    phase="style_anchor",
+                    label="Gerando âncora visual de estilo do livro…",
+                    percent=_pct(),
+                    current_step=1,
                 )
+                anchor_prompt = (
+                    f"{state.context_prompt.strip()}\n\n"
+                    f"Style anchor showcase subject: {anchor_subject}."
+                )
+
+                def _gen_anchor() -> Image.Image:
+                    provider = get_provider(provider_name, model_name)
+                    img = generate_matching(
+                        provider,
+                        anchor_prompt,
+                        target_size=cfg.image_px,
+                        negative_prompt=cfg.negative_prompt,
+                    )
+                    return to_line_art(img, cfg.processing)
+
+                anchor_img = await asyncio.to_thread(_gen_anchor)
+                store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
+                anchor_img.save(store.session_style_path(sid), "PNG")
+        done_img_steps += 1
+        if _is_cancelled():
+            _finish_cancelled("style_anchor", _pct(), 1)
+            return
+        style_bytes = store.effective_style_reference_bytes(
+        sid, state.category, 1, preset_id=state.preset_id
+    )
+
+        # Phase 3: Generate Character Sheets (skip already-ready sheets on resume)
+        chars_dir = store.session_characters_dir(sid)
+        for idx, char in enumerate(state.characters, start=1):
+            if _is_cancelled():
+                _finish_cancelled("sheets", _pct(), 2)
                 return
+            if (
+                req.resume
+                and char.sheet_status == "ready"
+                and (chars_dir / char.filename).exists()
+            ):
+                done_img_steps += 1
+                continue
             _set_autopilot(
                 sid,
                 status="running",
@@ -1560,14 +1649,17 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 return to_line_art(img, cfg.processing)
 
             sheet_img = await asyncio.to_thread(_gen_sheet)
-            store.session_characters_dir(sid).mkdir(parents=True, exist_ok=True)
-            sheet_img.save(store.session_characters_dir(sid) / char.filename, "PNG")
+            chars_dir.mkdir(parents=True, exist_ok=True)
+            sheet_img.save(chars_dir / char.filename, "PNG")
             char.sheet_status = "ready"
             char.approved = True
             char.updated_at = datetime.now()
             state.current_step = 2
             store.save_session(state)
             done_img_steps += 1
+            if _is_cancelled():
+                _finish_cancelled("sheets", _pct(), 2)
+                return
 
         if req.stop_after == "sheets":
             _set_autopilot(
@@ -1580,14 +1672,17 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             )
             return
 
-        # Phase 4: Generate Every Page with Style Anchor + Character Sheets
+        # Phase 4: Generate Every Page with Style Anchor + Character Sheets (skip done pages on resume)
         char_by_id = {c.id: c for c in state.characters}
+        pages_dir = store.pages_dir(sid)
         for page in state.pages:
-            if sid in _autopilot_cancel:
-                _set_autopilot(
-                    sid, status="cancelled", phase="pages", label="Geração automática cancelada.", percent=_pct(), current_step=3
-                )
+            if _is_cancelled():
+                _finish_cancelled("pages", _pct(), 3)
                 return
+            fname = f"page-{page.index:03d}.png"
+            if req.resume and page.status == "done" and (pages_dir / fname).exists():
+                done_img_steps += 1
+                continue
             _set_autopilot(
                 sid,
                 status="running",
@@ -1639,7 +1734,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 char_item = char_by_id.get(cid)
                 if char_item is None:
                     continue
-                cpath = store.session_characters_dir(sid) / char_item.filename
+                cpath = chars_dir / char_item.filename
                 if cpath.exists():
                     refs.append((char_item.name, cpath.read_bytes()))
 
@@ -1669,9 +1764,8 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 return raw_img, proc
 
             raw_img, processed = await asyncio.to_thread(_gen_page)
-            fname = f"page-{page.index:03d}.png"
             raw_img.save(store.raw_dir(sid) / fname, "PNG")
-            processed.save(store.pages_dir(sid) / fname, "PNG", dpi=(cfg.dpi, cfg.dpi))
+            processed.save(pages_dir / fname, "PNG", dpi=(cfg.dpi, cfg.dpi))
             preview = processed.copy()
             preview.thumbnail((640, 900), Image.Resampling.LANCZOS)
             preview.save(store.preview_dir(sid) / fname, "PNG", optimize=True)
@@ -1722,15 +1816,31 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             current_step=4,
         )
     except Exception as exc:
-        _set_autopilot(
-            sid,
-            status="error",
-            phase="error",
-            label="Autopilot interrompido com erro.",
-            percent=0,
-            current_step=1,
-            error=str(exc),
-        )
+        try:
+            st_state = store.load_session(sid)
+            if st_state is not None and _reset_stuck_generating(st_state):
+                store.save_session(st_state)
+        except Exception:
+            pass
+        if sid in _autopilot_cancel:
+            _set_autopilot(
+                sid,
+                status="cancelled",
+                phase="cancelled",
+                label="Geração cancelada. Você pode continuar de onde parou.",
+                percent=_autopilot_status.get(sid, AutopilotStatus()).percent,
+                current_step=_autopilot_status.get(sid, AutopilotStatus()).current_step,
+            )
+        else:
+            _set_autopilot(
+                sid,
+                status="error",
+                phase="error",
+                label="Autopilot interrompido com erro. Você pode continuar de onde parou.",
+                percent=_autopilot_status.get(sid, AutopilotStatus()).percent,
+                current_step=_autopilot_status.get(sid, AutopilotStatus()).current_step,
+                error=str(exc),
+            )
     finally:
         _autopilot_cancel.discard(sid)
 
@@ -1753,7 +1863,11 @@ def start_autopilot(sid: str, body: AutopilotRequest) -> AutopilotStatus:
         sid,
         status="running",
         phase="starting",
-        label="Iniciando criação automática completa…",
+        label=(
+            "Retomando geração de onde parou…"
+            if body.resume
+            else "Iniciando criação automática completa…"
+        ),
         percent=3,
         current_step=1,
     )
@@ -1773,10 +1887,22 @@ def get_autopilot_status(sid: str) -> AutopilotStatus:
 
 @router.post("/autopilot/cancel", response_model=AutopilotStatus)
 def cancel_autopilot(sid: str) -> AutopilotStatus:
-    _session(sid)
+    state = _session(sid)
     _autopilot_cancel.add(sid)
+    existing = _autopilot_threads.get(sid)
     current = _autopilot_status.get(sid)
-    if current and current.status == "running":
+    if existing is not None and existing.is_alive() and current and current.status == "running":
         current.label = "Cancelando após a etapa atual…"
+        current.cancelling = True
         return current
-    return current or AutopilotStatus()
+    if _reset_stuck_generating(state):
+        store.save_session(state)
+    _set_autopilot(
+        sid,
+        status="cancelled",
+        phase=current.phase if current else "cancelled",
+        label="Geração cancelada. Você pode continuar de onde parou.",
+        percent=current.percent if current else 0,
+        current_step=current.current_step if current else 1,
+    )
+    return _autopilot_status[sid]
