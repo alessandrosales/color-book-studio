@@ -23,7 +23,12 @@ from starlette.responses import Response
 from color_book_generator import __version__
 from color_book_generator.auth import codex as codex_auth
 from color_book_generator.auth.codex import DEFAULT_CODEX_MODEL, normalize_codex_model
-from color_book_generator.config import BookConfig, CaptionConfig, load_book_config
+from color_book_generator.config import (
+    BookConfig,
+    CaptionConfig,
+    default_book_config_path,
+    load_book_config,
+)
 from color_book_generator.layout.pdf import compose_pdf
 from color_book_generator.processing.line_art import prepare_page
 from color_book_generator.prompts import (
@@ -57,7 +62,7 @@ _locks: dict[tuple[str, int], asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def _config() -> BookConfig:
-    path = Path(os.getenv("CBG_CONFIG", "config/book.yaml"))
+    path = default_book_config_path()
     if not path.exists():
         raise HTTPException(status_code=500, detail=f"config not found: {path}")
     return load_book_config(path)

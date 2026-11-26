@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -116,6 +117,16 @@ class EnvSettings(BaseSettings):
 
     provider: str | None = None
     model: str | None = None
+
+
+def default_book_config_path() -> Path:
+    override = os.getenv("CBG_CONFIG")
+    if override:
+        return Path(override).expanduser()
+    candidate = Path(__file__).resolve().parents[3]
+    if (candidate / "pyproject.toml").exists():
+        return candidate / "config" / "book.yaml"
+    return Path("config/book.yaml")
 
 
 def load_book_config(path: str | Path) -> BookConfig:

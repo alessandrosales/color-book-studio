@@ -213,6 +213,15 @@
       </section>
     </main>
 
+    <div class="busy-overlay is-hidden" id="busy-overlay" role="status" aria-live="polite">
+      <div class="busy-card">
+        <div class="spinner busy-spinner"></div>
+        <h3 id="busy-title">Importando backup…</h3>
+        <div class="busy-bar" id="busy-bar"><div class="busy-fill" id="busy-fill"></div></div>
+        <p class="busy-sub" id="busy-sub">Não feche esta página.</p>
+      </div>
+    </div>
+
     <div class="lightbox is-hidden" id="lightbox" role="dialog" aria-modal="true" aria-label="Visualizar página">
       <button class="lightbox-close" id="lightbox-close" aria-label="Fechar">×</button>
       <button class="lightbox-nav prev" id="lightbox-prev" aria-label="Página anterior">‹</button>

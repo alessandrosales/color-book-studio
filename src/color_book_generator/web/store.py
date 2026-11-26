@@ -3,16 +3,34 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-WEB_ROOT = Path("output/web")
+
+def _default_web_root() -> Path:
+    override = os.getenv("CBG_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+    candidate = Path(__file__).resolve().parents[3]
+    if (candidate / "pyproject.toml").exists():
+        return candidate / "output" / "web"
+    return Path.cwd() / "output" / "web"
+
+
+WEB_ROOT = _default_web_root()
 
 PageStatus = Literal["pending", "generating", "done", "error"]
+
+
+def _drop_nulls(data: object) -> object:
+    if isinstance(data, dict):
+        return {key: value for key, value in data.items() if value is not None}
+    return data
 
 
 class BookSettings(BaseModel):
@@ -28,6 +46,11 @@ class BookSettings(BaseModel):
     caption_font_bold: bool = False
     caption_font_size: float = 0.032
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_nulls(cls, data: Any) -> Any:
+        return _drop_nulls(data)
+
 
 class PageState(BaseModel):
     index: int
@@ -40,6 +63,11 @@ class PageState(BaseModel):
     width_px: int | None = None
     height_px: int | None = None
     updated_at: datetime | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_nulls(cls, data: Any) -> Any:
+        return _drop_nulls(data)
 
 
 class SessionState(BaseModel):
@@ -57,6 +85,11 @@ class SessionState(BaseModel):
     caption_font_family: Literal["sans", "serif", "mono"] = "sans"
     caption_font_bold: bool = False
     caption_font_size: float = 0.032
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_nulls(cls, data: Any) -> Any:
+        return _drop_nulls(data)
 
 
 class CharacterRecord(BaseModel):

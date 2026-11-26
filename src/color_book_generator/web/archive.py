@@ -10,9 +10,12 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
+import yaml
+from PIL import Image
 from pydantic import BaseModel
 
 from color_book_generator import __version__
+from color_book_generator.config import BookConfig, default_book_config_path
 from color_book_generator.web import store
 
 ARCHIVE_VERSION = 1
@@ -23,6 +26,10 @@ MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 
 class ArchiveError(RuntimeError):
     """Raised when an archive is invalid or unsafe."""
+
+
+def book_config_path() -> Path:
+    return default_book_config_path()
 
 
 class ImportResult(BaseModel):
@@ -46,6 +53,10 @@ def export_archive(destination: Path) -> Path:
                     continue
                 zf.write(path, f"data/{rel.as_posix()}")
                 files += 1
+        config = book_config_path()
+        if config.exists():
+            zf.write(config, "data/project/book.yaml")
+            files += 1
         manifest = {
             "archive_version": ARCHIVE_VERSION,
             "app_version": __version__,
@@ -63,12 +74,29 @@ def export_to_temp() -> Path:
 
 
 def _safe_relative(name: str) -> PurePosixPath | None:
-    path = PurePosixPath(name.replace("\\", "/"))
-    if path.is_absolute() or not path.parts:
+    """Map an archive member to a path relative to the workspace root."""
+    raw = name.replace("\\", "/")
+    path = PurePosixPath(raw)
+    if raw.startswith("/") or not path.parts:
         raise ArchiveError(f"caminho invalido no backup: {name}")
-    if ".." in path.parts or path.parts[0] != "data":
+    if ".." in path.parts:
         raise ArchiveError(f"caminho invalido no backup: {name}")
-    return path
+    parts = path.parts
+    if parts[0] == "__MACOSX" or ".DS_Store" in parts:
+        return None
+    if parts[0] == "data":
+        rel = parts[1:]
+    elif len(parts) >= 2 and parts[0] == "output" and parts[1] == "web":
+        rel = parts[2:]
+    elif parts[0] in {"settings.json", "characters", "style"} or (len(parts) >= 2 and parts[-1] in {"session.json", "characters.json", "reference.png"}):
+        rel = parts
+    elif "data" in parts:
+        rel = parts[parts.index("data") + 1 :]
+    else:
+        return None
+    if not rel:
+        return None
+    return PurePosixPath(*rel)
 
 
 def _extract(archive: BinaryIO, target: Path) -> None:
@@ -79,20 +107,21 @@ def _extract(archive: BinaryIO, target: Path) -> None:
 
     with zf:
         names = zf.namelist()
-        if MANIFEST_NAME not in names:
-            raise ArchiveError("manifest.json ausente: backup invalido")
-        try:
-            manifest: dict[str, Any] = json.loads(zf.read(MANIFEST_NAME))
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise ArchiveError("manifest.json invalido") from exc
-        if manifest.get("archive_version") != ARCHIVE_VERSION:
-            raise ArchiveError(
-                f"versao de backup nao suportada: {manifest.get('archive_version')}"
-            )
+        manifest_name = next(
+            (n for n in names if PurePosixPath(n).name == MANIFEST_NAME), None
+        )
+        if manifest_name is not None:
+            try:
+                manifest: dict[str, Any] = json.loads(zf.read(manifest_name))
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ArchiveError("manifest.json invalido") from exc
+            version = manifest.get("archive_version")
+            if version is not None and version != ARCHIVE_VERSION:
+                raise ArchiveError(f"versao de backup nao suportada: {version}")
 
         total = 0
         for info in zf.infolist():
-            if info.is_dir() or info.filename == MANIFEST_NAME:
+            if info.is_dir() or PurePosixPath(info.filename).name == MANIFEST_NAME:
                 continue
             if info.file_size > MAX_FILE_BYTES:
                 raise ArchiveError(f"arquivo grande demais no backup: {info.filename}")
@@ -111,36 +140,73 @@ def _extract(archive: BinaryIO, target: Path) -> None:
                 shutil.copyfileobj(source, out)
 
 
-def _merge_characters(source: Path) -> int:
-    incoming_path = source / "characters" / "characters.json"
-    if not incoming_path.exists():
-        return len(store.load_characters())
+def _load_characters(source: Path) -> list[store.CharacterRecord] | None:
+    path = source / "characters" / "characters.json"
+    if not path.exists():
+        return None
     try:
-        incoming = json.loads(incoming_path.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ArchiveError("characters.json invalido no backup") from exc
-    records = {record.id: record for record in store.load_characters()}
-    for entry in incoming if isinstance(incoming, list) else []:
+    records: list[store.CharacterRecord] = []
+    for entry in raw if isinstance(raw, list) else []:
         try:
             record = store.CharacterRecord.model_validate(entry)
         except ValueError:
             continue
-        records[record.id] = record
-        image = source / "characters" / record.filename
-        if image.exists():
+        if not (source / "characters" / record.filename).exists():
+            raise ArchiveError(f"imagem do personagem ausente no backup: {record.name}")
+        records.append(record)
+    return records
+
+
+def _merge_characters(
+    records: list[store.CharacterRecord] | None, source: Path
+) -> int:
+    existing = {record.id: record for record in store.load_characters()}
+    if records is not None:
+        for record in records:
+            existing[record.id] = record
             store.characters_dir().mkdir(parents=True, exist_ok=True)
-            shutil.copy2(image, store.characters_dir() / record.filename)
-    ordered = sorted(records.values(), key=lambda r: r.created_at)
+            shutil.copy2(
+                source / "characters" / record.filename,
+                store.characters_dir() / record.filename,
+            )
+    ordered = sorted(existing.values(), key=lambda r: r.created_at)
     store.save_characters(ordered)
     return len(ordered)
 
 
-def _merge_sessions(source: Path, result: ImportResult) -> None:
-    latest_created = None
+def _load_settings(source: Path) -> store.BookSettings | None:
+    path = source / "settings.json"
+    if not path.exists():
+        return None
+    try:
+        return store.BookSettings.model_validate_json(
+            path.read_text(encoding="utf-8")
+        )
+    except ValueError as exc:
+        raise ArchiveError("settings.json invalido no backup") from exc
+
+
+def _load_config(source: Path) -> BookConfig | None:
+    path = source / "project" / "book.yaml"
+    if not path.exists():
+        return None
+    try:
+        return BookConfig.model_validate(
+            yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        )
+    except Exception as exc:
+        raise ArchiveError("book.yaml invalido no backup") from exc
+
+
+def _load_sessions(source: Path) -> list[tuple[store.SessionState, Path]]:
+    sessions: list[tuple[store.SessionState, Path]] = []
     for directory in sorted(source.iterdir()):
         if not directory.is_dir():
             continue
-        if directory.name in {"characters", "style", "exports"}:
+        if directory.name in {"characters", "style", "exports", "project"}:
             continue
         state_file = directory / "session.json"
         if not state_file.exists():
@@ -153,6 +219,15 @@ def _merge_sessions(source: Path, result: ImportResult) -> None:
             raise ArchiveError(
                 f"session.json invalido em {directory.name}"
             ) from exc
+        sessions.append((state, directory))
+    return sessions
+
+
+def _merge_sessions(
+    sessions: list[tuple[store.SessionState, Path]], result: ImportResult
+) -> None:
+    latest_created = None
+    for state, directory in sessions:
         destination = store.session_dir(state.id)
         if destination.exists():
             shutil.rmtree(destination)
@@ -170,26 +245,41 @@ def import_archive(archive: BinaryIO) -> ImportResult:
         extracted = Path(tmp) / "data"
         extracted.mkdir(parents=True, exist_ok=True)
         archive.seek(0)
-        _extract(archive, extracted.parent)
+        _extract(archive, extracted)
 
-        result.characters = _merge_characters(extracted)
-
+        sessions = _load_sessions(extracted)
+        characters = _load_characters(extracted)
+        settings = _load_settings(extracted)
+        config = _load_config(extracted)
         style_source = extracted / "style" / "reference.png"
-        if style_source.exists():
+        has_style = style_source.exists()
+        if has_style:
+            try:
+                Image.open(style_source).verify()
+            except Exception as exc:
+                raise ArchiveError("reference.png invalido no backup") from exc
+
+        if not (
+            sessions
+            or characters is not None
+            or settings is not None
+            or config is not None
+            or has_style
+        ):
+            raise ArchiveError("o backup nao contem dados do projeto")
+
+        # Everything validated; now apply changes.
+        result.characters = _merge_characters(characters, extracted)
+        if has_style:
             store.style_dir().mkdir(parents=True, exist_ok=True)
             shutil.copy2(style_source, store.style_path())
             result.style = True
-
-        settings_source = extracted / "settings.json"
-        if settings_source.exists():
-            try:
-                settings = store.BookSettings.model_validate_json(
-                    settings_source.read_text(encoding="utf-8")
-                )
-            except ValueError as exc:
-                raise ArchiveError("settings.json invalido no backup") from exc
+        if config is not None:
+            destination = book_config_path()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(extracted / "project" / "book.yaml", destination)
+        if settings is not None:
             store.save_settings(settings)
-
-        _merge_sessions(extracted, result)
+        _merge_sessions(sessions, result)
 
     return result

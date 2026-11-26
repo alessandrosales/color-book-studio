@@ -137,6 +137,11 @@ async function refreshSession() {
 }
 
 async function saveSettings(skipSession = false) {
+  const rawFontSize = Number($("#caption-size").value);
+  const fontSize =
+    Number.isFinite(rawFontSize) && rawFontSize >= 0.01 && rawFontSize <= 0.08
+      ? rawFontSize
+      : 0.032;
   const payload = {
     title: $("#session-title").value.trim() || state.defaults.title,
     pages: clampPages($("#pages-count").value),
@@ -144,11 +149,11 @@ async function saveSettings(skipSession = false) {
     provider: $("#provider").value || state.defaults.provider,
     model: $("#model").value || state.defaults.model,
     caption_enabled: $("#caption-enabled").checked,
-    caption_style: $("#caption-style").value,
-    caption_position: $("#caption-position").value,
-    caption_font_family: $("#caption-font").value,
+    caption_style: $("#caption-style").value || "balloon",
+    caption_position: $("#caption-position").value || "bottom",
+    caption_font_family: $("#caption-font").value || "sans",
     caption_font_bold: $("#caption-weight").value === "bold",
-    caption_font_size: Number($("#caption-size").value),
+    caption_font_size: fontSize,
   };
   state.settings = await api("/api/settings", {
     method: "PUT",
@@ -212,6 +217,18 @@ function renderCharacters() {
 
     list.appendChild(item);
   }
+}
+
+function setSelectValue(select, value) {
+  const text = String(value);
+  const exists = Array.from(select.options).some((opt) => opt.value === text);
+  if (!exists) {
+    const option = document.createElement("option");
+    option.value = text;
+    option.textContent = text;
+    select.appendChild(option);
+  }
+  select.value = text;
 }
 
 function updateCaptionFields() {
@@ -501,9 +518,9 @@ function render() {
   $("#caption-enabled").checked = Boolean(capEnabled);
   $("#caption-style").value = capStyle;
   $("#caption-position").value = capPosition;
-  $("#caption-font").value = capFont;
-  $("#caption-weight").value = capBold ? "bold" : "normal";
-  $("#caption-size").value = String(capSize);
+  setSelectValue($("#caption-font"), capFont || "sans");
+  setSelectValue($("#caption-weight"), capBold ? "bold" : "normal");
+  setSelectValue($("#caption-size"), capSize || 0.032);
   updateCaptionFields();
 
   const list = $("#page-list");
@@ -799,6 +816,33 @@ async function removeCharacter(id) {
   }
 }
 
+function showBusy(title, sub = "Não feche esta página.") {
+  $("#busy-title").textContent = title;
+  $("#busy-sub").textContent = sub;
+  $("#busy-fill").style.width = "0%";
+  $("#busy-bar").classList.remove("indeterminate");
+  $("#busy-overlay").classList.remove("is-hidden");
+  document.body.classList.add("lightbox-open");
+}
+
+function busyProgress(percent, title) {
+  if (title) $("#busy-title").textContent = title;
+  const clamped = Math.max(0, Math.min(100, percent));
+  $("#busy-fill").style.width = `${clamped}%`;
+  $("#busy-sub").textContent = `${Math.round(clamped)}%`;
+}
+
+function busyProcessing(title) {
+  $("#busy-title").textContent = title;
+  $("#busy-sub").textContent = "Processando… não feche esta página.";
+  $("#busy-bar").classList.add("indeterminate");
+}
+
+function hideBusy() {
+  $("#busy-overlay").classList.add("is-hidden");
+  document.body.classList.remove("lightbox-open");
+}
+
 async function importBackup() {
   const fileInput = $("#import-file");
   const errorBox = $("#backup-error");
@@ -813,24 +857,52 @@ async function importBackup() {
   form.append("archive", file);
   const button = $("#import-btn");
   button.disabled = true;
-  button.textContent = "Importando…";
-  try {
-    const result = await api("/api/import", { method: "POST", body: form });
-    toast(
-      `Backup importado: ${result.sessions} sessões, ${result.pages} páginas, ` +
-        `${result.characters} personagens.`
-    );
-    if (result.latest_session) {
-      localStorage.setItem(STORAGE_KEY, result.latest_session);
+
+  showBusy("Enviando backup…", "0%");
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/import");
+  xhr.responseType = "json";
+  xhr.timeout = 20 * 60 * 1000;
+  xhr.upload.onprogress = (event) => {
+    if (event.lengthComputable) {
+      busyProgress((event.loaded / event.total) * 100, "Enviando backup…");
     }
-    setTimeout(() => window.location.reload(), 1200);
-  } catch (err) {
-    errorBox.textContent = err.message || "Falha ao importar o backup.";
-    errorBox.classList.remove("is-hidden");
-  } finally {
+  };
+  xhr.upload.onload = () => {
+    busyProcessing("Importando sessões, imagens e personagens…");
+  };
+  xhr.onload = () => {
+    if (xhr.status >= 200 && xhr.status < 300) {
+      const result = xhr.response || {};
+      busyProgress(100, "Importação concluída");
+      $("#busy-sub").textContent =
+        `${result.sessions || 0} sessões · ${result.pages || 0} páginas · ` +
+        `${result.characters || 0} personagens`;
+      if (result.latest_session) {
+        localStorage.setItem(STORAGE_KEY, result.latest_session);
+      }
+      setTimeout(() => window.location.reload(), 900);
+    } else {
+      const body = xhr.response || {};
+      hideBusy();
+      button.disabled = false;
+      errorBox.textContent = body.detail || `Falha ao importar (HTTP ${xhr.status}).`;
+      errorBox.classList.remove("is-hidden");
+    }
+  };
+  xhr.onerror = () => {
+    hideBusy();
     button.disabled = false;
-    button.textContent = "Importar backup";
-  }
+    errorBox.textContent = "Falha de rede durante a importação.";
+    errorBox.classList.remove("is-hidden");
+  };
+  xhr.ontimeout = () => {
+    hideBusy();
+    button.disabled = false;
+    errorBox.textContent = "A importação demorou demais e foi interrompida.";
+    errorBox.classList.remove("is-hidden");
+  };
+  xhr.send(form);
 }
 
 async function savePageChanges(index) {
@@ -1102,9 +1174,9 @@ async function boot() {
   $("#caption-enabled").checked = eff.caption_enabled;
   $("#caption-style").value = eff.caption_style;
   $("#caption-position").value = eff.caption_position;
-  $("#caption-font").value = eff.caption_font_family;
-  $("#caption-weight").value = eff.caption_font_bold ? "bold" : "normal";
-  $("#caption-size").value = String(eff.caption_font_size);
+  setSelectValue($("#caption-font"), eff.caption_font_family || "sans");
+  setSelectValue($("#caption-weight"), eff.caption_font_bold ? "bold" : "normal");
+  setSelectValue($("#caption-size"), eff.caption_font_size || 0.032);
   updateCaptionFields();
 
   const saved = localStorage.getItem(STORAGE_KEY);

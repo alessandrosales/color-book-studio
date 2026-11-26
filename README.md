@@ -48,10 +48,12 @@ uv run cbg web                       # http://127.0.0.1:8000
   Clicar na miniatura abre um **lightbox** (navegação com ←/→, fecha com Esc/clique
   fora) sem baixar o arquivo.
 - **Gerar pendentes** roda a fila; **Gerar PDF** compõe o interior no tamanho trim.
-- **Backup**: o painel *Backup* exporta um `.zip` com sessões, imagens geradas,
-  personagens, estilo e `settings.json`, e importa de volta com validação de
-  caminho/versão. Sessões do arquivo substituem as de mesmo id; personagens são
-  mesclados por id. Credenciais não são exportadas.
+- **Backup**: o painel *Backup* exporta um `.zip` com sessões (incluindo
+  `raw/`, páginas, `previews/`, `book.pdf`), personagens, estilo, `settings.json`
+  e `config/book.yaml`. A importação valida tudo antes de escrever (sem estado
+  parcial), aceita zips antigos/sem manifest e mostra uma tela de progresso.
+  Sessões substituem as de mesmo id; personagens são mesclados por id; o
+  `book.yaml` restaurado mantém geometria/margens/DPI. Credenciais não entram.
 - Sessões são persistidas em `output/web/<id>/` (`session.json`, `pages/`, `raw/`,
   `previews/`, `book.pdf`), então recarregar a página retoma a mesma sessão.
 
@@ -116,6 +118,7 @@ src/color_book_generator/
   web/                                # FastAPI + UI (prompts por página)
 output/<run>/{raw,pages,book.pdf,manifest.json}
 output/web/<session>/{pages,raw,previews,book.pdf,session.json}
+output/web/{settings.json,characters/,style/}
 ```
 
 ## Como o pipeline funciona

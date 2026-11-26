@@ -410,6 +410,15 @@ def test_patch_caption_font_settings() -> None:
 
 
 def test_export_import_roundtrip(monkeypatch, tmp_path) -> None:
+    from color_book_generator.web import archive as backup_archive
+
+    config_path = tmp_path / "config" / "book.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        "title: Backup Book\ntheme: unicorns\npages: 2\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(backup_archive, "book_config_path", lambda: config_path)
+
     session = client.post(
         "/api/sessions",
         json={"pages": 2, "provider": "fake", "model": "fake-1", "title": "Backup Book"},
@@ -474,6 +483,15 @@ def test_export_import_roundtrip(monkeypatch, tmp_path) -> None:
     assert page["status"] == "done"
     assert client.get(page["view_url"]).status_code == 200
 
+    restored_config = tmp_path / "restored-config.yaml"
+    monkeypatch.setattr(backup_archive, "book_config_path", lambda: restored_config)
+    reimported = client.post(
+        "/api/import",
+        files={"archive": ("backup.zip", zip_bytes, "application/zip")},
+    )
+    assert reimported.status_code == 200, reimported.text
+    assert "unicorns" in restored_config.read_text(encoding="utf-8")
+
 
 def test_import_rejects_zip_slip(monkeypatch, tmp_path) -> None:
     import io
@@ -491,16 +509,69 @@ def test_import_rejects_zip_slip(monkeypatch, tmp_path) -> None:
     assert res.status_code == 400
 
 
-def test_import_requires_manifest(monkeypatch, tmp_path) -> None:
+def test_import_accepts_legacy_zip_without_manifest(monkeypatch, tmp_path) -> None:
     import io
     import zipfile
 
     monkeypatch.setattr(store, "WEB_ROOT", tmp_path / "restored")
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as zf:
-        zf.writestr("data/settings.json", "{}")
+        zf.writestr(
+            "data/settings.json",
+            json.dumps(
+                {
+                    "title": "Legacy",
+                    "pages": 3,
+                    "context_prompt": "ctx",
+                    "provider": "codex",
+                    "model": "gpt-6.2-sol",
+                }
+            ),
+        )
     res = client.post(
         "/api/import",
-        files={"archive": ("bad.zip", buffer.getvalue(), "application/zip")},
+        files={"archive": ("legacy.zip", buffer.getvalue(), "application/zip")},
     )
-    assert res.status_code == 400
+    assert res.status_code == 200, res.text
+    assert client.get("/api/settings").json()["title"] == "Legacy"
+
+
+def test_import_tolerates_null_caption_settings(monkeypatch, tmp_path) -> None:
+    import io
+    import zipfile
+
+    monkeypatch.setattr(store, "WEB_ROOT", tmp_path / "restored")
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr(
+            "manifest.json",
+            json.dumps({"archive_version": 1, "app_version": "0.1.0"}),
+        )
+        zf.writestr(
+            "data/settings.json",
+            json.dumps(
+                {
+                    "title": "Legacy Nulls",
+                    "pages": 4,
+                    "context_prompt": "ctx",
+                    "provider": "codex",
+                    "model": "gpt-6.2-sol",
+                    "caption_enabled": True,
+                    "caption_style": "caption",
+                    "caption_position": "bottom",
+                    "caption_font_family": None,
+                    "caption_font_bold": None,
+                    "caption_font_size": None,
+                }
+            ),
+        )
+    res = client.post(
+        "/api/import",
+        files={"archive": ("legacy.zip", buffer.getvalue(), "application/zip")},
+    )
+    assert res.status_code == 200, res.text
+    settings = client.get("/api/settings").json()
+    assert settings["title"] == "Legacy Nulls"
+    assert settings["caption_font_family"] == "sans"
+    assert settings["caption_font_bold"] is False
+    assert settings["caption_font_size"] == 0.032
