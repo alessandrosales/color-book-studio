@@ -152,14 +152,6 @@ def _style_anchor_view(
             font_family=font_family,
             font_bold=font_bold,
         )
-    global_path = store.style_path()
-    if global_path.exists():
-        return StyleAnchorView(
-            url=f"/api/style/image?v={int(global_path.stat().st_mtime)}",
-            inherited_global=True,
-            font_family=font_family,
-            font_bold=font_bold,
-        )
     return StyleAnchorView(
         url=None, inherited_global=False, font_family=font_family, font_bold=font_bold
     )
@@ -337,8 +329,6 @@ async def detect_session_style_typography(sid: str) -> StyleAnchorView:
     state = _session(sid)
     path = store.session_style_path(sid)
     if not path.exists():
-        path = store.style_path()
-    if not path.exists():
         raise HTTPException(
             status_code=400, detail="envie uma amostra de texto antes de detectar a fonte"
         )
@@ -381,6 +371,9 @@ async def generate_session_style(sid: str, body: GenerateStyleRequest) -> StyleA
     prompt = f"{state.context_prompt.strip()}\n\nStyle anchor showcase subject: {subject}."
     negative = state.negative_prompt or cfg.negative_prompt
     processing = state.processing or cfg.processing
+    category_style_ref = store.load_page_layout_reference_bytes(
+        state.category, 1, preset_id=state.preset_id
+    )
 
     def _run() -> Image.Image:
         provider = get_provider(provider_name, model_name)
@@ -389,6 +382,7 @@ async def generate_session_style(sid: str, body: GenerateStyleRequest) -> StyleA
             prompt,
             target_size=(1024, 1024),
             negative_prompt=negative,
+            style_reference=category_style_ref,
         )
         return to_line_art(img, processing)
 
@@ -959,7 +953,9 @@ async def generate_character_sheet(
     )
     negative = state.negative_prompt or cfg.negative_prompt
     processing = state.processing or cfg.processing
-    style_bytes = store.load_session_style_bytes(sid)
+    style_bytes = store.effective_style_reference_bytes(
+        sid, state.category, 1, preset_id=state.preset_id
+    )
 
     existing_img_path = store.session_characters_dir(sid) / char.filename
     ref_list: list[tuple[str, bytes]] | None = None

@@ -418,7 +418,8 @@ def test_character_upload_requires_name_and_image() -> None:
     assert bad_image.status_code == 400
 
 
-def test_style_reference_upload_used_and_removed() -> None:
+def test_style_reference_is_isolated_per_book_and_falls_back_to_category() -> None:
+    # A legacy global style upload must NOT bleed into an unrelated book session
     upload = client.post(
         "/api/style",
         files={"image": ("style.png", _png_bytes(), "image/png")},
@@ -428,15 +429,24 @@ def test_style_reference_upload_used_and_removed() -> None:
     assert client.get("/api/style/image").status_code == 200
 
     session = client.post(
-        "/api/sessions", json={"pages": 1, "provider": "fake", "model": "fake-1"}
+        "/api/sessions",
+        json={
+            "pages": 1,
+            "provider": "fake",
+            "model": "fake-1",
+            "preset_id": "manga_lineart",
+        },
     ).json()
+    assert session["style_url"] is None
+    assert session["style_inherited_global"] is False
+
     gen = client.post(
         f"/api/sessions/{session['id']}/pages/1/generate",
         json={"provider": "fake"},
     )
     assert gen.json()["status"] == "done"
     assert FakeProvider.last_style_reference is not None
-    assert FakeProvider.last_style_reference.startswith(b"\x89PNG")
+    assert FakeProvider.last_style_reference == store.load_page_layout_reference_bytes("manga", 1)
 
     use = client.post(f"/api/sessions/{session['id']}/pages/1/use-as-style")
     assert use.status_code == 200

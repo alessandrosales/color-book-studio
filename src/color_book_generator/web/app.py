@@ -1240,9 +1240,8 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
     if char_notes:
         full_prompt = f"{full_prompt}\n\nCharacters in this scene: {'; '.join(char_notes)}."
     references = _load_references(page.character_ids, state)
-    style_reference = (
-        store.load_session_style_bytes(sid)
-        or store.load_page_layout_reference_bytes(state.category, index)
+    style_reference = store.effective_style_reference_bytes(
+        sid, state.category, index, preset_id=state.preset_id
     )
 
     lock = _locks[(sid, index)]

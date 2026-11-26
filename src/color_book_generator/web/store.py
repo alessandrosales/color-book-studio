@@ -260,42 +260,70 @@ def session_style_path(sid: str) -> Path:
 
 
 def load_session_style_bytes(sid: str) -> bytes | None:
+    """Return only this book's own style anchor image (never inherits a global style)."""
     path = session_style_path(sid)
-    if path.exists():
-        return path.read_bytes()
-    return load_style_bytes()
+    return path.read_bytes() if path.exists() else None
+
+
+def effective_style_reference_bytes(
+    sid: str,
+    category: str,
+    page_index: int = 1,
+    *,
+    preset_id: str | None = None,
+) -> bytes | None:
+    """Return this book's style anchor, falling back to the built-in category/preset reference."""
+    return load_session_style_bytes(sid) or load_page_layout_reference_bytes(
+        category, page_index, preset_id=preset_id
+    )
 
 
 def clear_session_style(sid: str) -> None:
     session_style_path(sid).unlink(missing_ok=True)
 
 
-_LAYOUT_REF_FILES: dict[str, tuple[str, ...]] = {
-    "cozy": ("single_full.png", "cozy_2.png"),
-    "kids": ("single_caption.png", "kids_2.png"),
-    "manga": ("manga_action.png", "manga_2.png"),
-    "manhwa": ("manhwa_editorial.png", "manhwa_2.png"),
-    "kawaii": ("kawaii_stickers.png", "kawaii_2.png"),
-    "adult": ("adult_medallion.png", "adult_2.png"),
-}
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+_SAFE_SLUG_RE = re.compile(r"^[a-z0-9_-]+$")
 
 
-def page_layout_reference_paths(category: str) -> list[Path]:
-    """Return built-in illustrated page-layout reference PNGs for ``category``."""
+def _list_ref_images(directory: Path) -> list[Path]:
+    if not directory.is_dir():
+        return []
+    return sorted(
+        p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in _IMAGE_EXTS
+    )
+
+
+def page_layout_reference_paths(
+    category: str, preset_id: str | None = None
+) -> list[Path]:
+    """Return built-in illustrated reference images for ``category`` (or ``category/preset_id``)."""
     base = Path(__file__).resolve().parent / "static" / "page-layouts"
     if not base.exists():
         return []
-    candidates = _LAYOUT_REF_FILES.get(category, _LAYOUT_REF_FILES["cozy"])
-    found = [base / name for name in candidates if (base / name).exists()]
-    for extra in sorted(base.glob(f"{category}_*.png")):
-        if extra not in found:
-            found.append(extra)
-    return found
+    cat = category.strip().lower()
+    if not _SAFE_SLUG_RE.match(cat):
+        cat = "cozy"
+    if preset_id:
+        pid = preset_id.strip().lower()
+        if _SAFE_SLUG_RE.match(pid):
+            preset_imgs = _list_ref_images(base / cat / pid)
+            if preset_imgs:
+                return preset_imgs
+    cat_imgs = _list_ref_images(base / cat)
+    if cat_imgs:
+        return cat_imgs
+    return _list_ref_images(base / "cozy")
 
 
-def load_page_layout_reference_bytes(category: str, page_index: int = 1) -> bytes | None:
-    """Pick a built-in page-layout reference image for ``category``, rotating per page."""
-    paths = page_layout_reference_paths(category)
+def load_page_layout_reference_bytes(
+    category: str,
+    page_index: int = 1,
+    *,
+    preset_id: str | None = None,
+) -> bytes | None:
+    """Pick a built-in page-layout reference image for ``category``/``preset_id``, rotating per page."""
+    paths = page_layout_reference_paths(category, preset_id=preset_id)
     if not paths:
         return None
     chosen = paths[(max(1, page_index) - 1) % len(paths)]

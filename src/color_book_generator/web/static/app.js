@@ -210,7 +210,7 @@ function renderStage1Form() {
       openLightbox([{ url: s.style_url, caption: "Amostra de texto de referência" }], 0);
     });
     preview.appendChild(img);
-    removeBtn.classList.toggle("is-hidden", Boolean(s.style_inherited_global));
+    removeBtn.classList.remove("is-hidden");
   } else {
     const span = document.createElement("span");
     span.textContent = "Nenhuma amostra de texto definida ainda. Envie uma imagem com o estilo de fonte desejado.";
@@ -668,14 +668,7 @@ async function insertContextualPage(afterIndex) {
 function allSelectableCharacters() {
   const s = state.session;
   if (!s) return [];
-  const map = new Map();
-  for (const c of s.characters) {
-    map.set(c.id, { id: c.id, name: c.name });
-  }
-  for (const c of state.globalCharacters) {
-    if (!map.has(c.id)) map.set(c.id, { id: c.id, name: `${c.name} (global)` });
-  }
-  return Array.from(map.values());
+  return s.characters.map((c) => ({ id: c.id, name: c.name }));
 }
 
 function renderCharacterChips(container, page, chars) {
