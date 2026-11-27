@@ -18,7 +18,12 @@ from color_book_generator.identity import (
     world_block,
 )
 from color_book_generator.presets import default_page_layout_for_category
-from color_book_generator.prompts import compose_page_prompt, effective_negative_prompt
+from color_book_generator.prompts import (
+    compose_page_prompt,
+    effective_negative_prompt,
+    line_standard_directive,
+)
+from color_book_generator.standards import line_standard
 from color_book_generator.web import store
 from color_book_generator.web.store import BookCharacter, PageState, SessionState
 
@@ -158,10 +163,12 @@ def page_job(
     )
     ids = page_character_ids(state, page)
     by_id = {c.id: c for c in state.characters}
+    std = line_standard(state.story_brief, state.category, state.preset_id)
     prompt = "\n\n".join(
         part
         for part in (
             base,
+            line_standard_directive(std),
             world_block(world_rules(state)),
             cast_block([design_text(by_id[cid]) for cid in ids]) if state.characters else "",
         )

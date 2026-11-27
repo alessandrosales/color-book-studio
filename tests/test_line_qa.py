@@ -117,6 +117,8 @@ def test_lines_report_and_thicken_endpoint() -> None:
     page = report["pages"][0]
     assert page["status"] == "thin" and page["fixable"] is True
     assert any("abaixo de 1.5 mm" in w for w in report["warnings"])
+    assert report["off_standard"] == [1]
+    assert client.get(f"/api/sessions/{sid}/kdp-preflight").json()["off_standard_pages"] == [1]
 
     res = client.post(f"/api/sessions/{sid}/lines/thicken").json()
     assert res["pages_fixed"] == [1]
@@ -126,6 +128,7 @@ def test_lines_report_and_thicken_endpoint() -> None:
 
     preflight = client.get(f"/api/sessions/{sid}/kdp-preflight").json()
     assert not any("abaixo de 1.5 mm" in w for w in preflight["warnings"])
+    assert preflight["off_standard_pages"] == []
 
 
 def test_thicken_unknown_page_is_404() -> None:

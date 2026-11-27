@@ -4,7 +4,9 @@ from color_book_generator.prompts import (
     compose_page_prompt,
     default_subjects,
     effective_negative_prompt,
+    line_standard_directive,
 )
+from color_book_generator.standards import LINE_STANDARDS
 
 
 def test_prompt_count_and_numbering() -> None:
@@ -133,3 +135,15 @@ def test_empty_caption_forbids_empty_speech_balloons_in_manga() -> None:
         caption_text="",
     )
     assert "no text and no speech balloons" in prompt.lower()
+
+
+def test_line_standard_directive_states_the_checked_targets() -> None:
+    kids = line_standard_directive(LINE_STANDARDS["3-5"])
+    assert "1.5 to 2.5 mm" in kids
+    assert "at least 8 mm across" in kids
+    assert "at most about 30 small closed shapes" in kids
+    assert "NO hatching" in kids
+
+    adult = line_standard_directive(LINE_STANDARDS["intricate"])
+    assert "0.5 to 0.8 mm" in adult
+    assert "at most about" not in adult  # dense detail is the point of adult pages

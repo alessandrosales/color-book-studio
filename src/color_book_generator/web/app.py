@@ -1616,7 +1616,8 @@ def kdp_preflight(sid: str) -> dict[str, object]:
         except (OSError, ValueError):
             errors.append(f"Não foi possível ler a imagem {path.name}.")
     warnings.extend(build_report(state, cfg, _session_caption(state)).warnings)
-    warnings.extend(build_line_report(state, cfg.dpi).warnings)
+    line_report = build_line_report(state, cfg.dpi)
+    warnings.extend(line_report.warnings)
     interior_errors = errors.copy()
     geo = _cover_geometry(state, rounded_pages)
     if not store.cover_path(sid).exists():
@@ -1642,6 +1643,7 @@ def kdp_preflight(sid: str) -> dict[str, object]:
             "profile": profile.id, "profile_name": profile.name,
             "gutter_mm": round(gutter * 25.4, 1),
             "adjusted_pages": [adj.page_number for adj in adjustments],
+            "off_standard_pages": line_report.off_standard,
             "interior_errors": interior_errors, "errors": errors, "warnings": warnings}
 
 

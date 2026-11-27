@@ -7,6 +7,7 @@ from pathlib import Path
 
 from color_book_generator.config import BookConfig
 from color_book_generator.models import PagePrompt
+from color_book_generator.standards import LineStandard
 
 COMPOSITIONS = [
     "close-up portrait, centered",
@@ -231,6 +232,42 @@ def build_layout_text_directive(
         f'friendly, crisp pure black {font_hint} matching the thick outlines: "{clean_text}". '
         "Render ONLY this exact text verbatim with accurate spelling and no extra unintended text."
     )
+
+
+def _stroke_words(mm: float) -> str:
+    if mm >= 2.5:
+        return "extra thick chunky marker"
+    if mm >= 1.5:
+        return "thick bold marker"
+    if mm >= 1.0:
+        return "medium-thick clean"
+    if mm >= 0.6:
+        return "fine clean ink"
+    return "fine technical pen"
+
+
+def line_standard_directive(std: LineStandard) -> str:
+    """Spell out the line check's targets so the page is drawn within them the first time."""
+    parts = [
+        f"Line weight standard ({std.label}): main outlines are {_stroke_words(std.line_min_mm)} lines, "
+        f"{std.line_min_mm:g} to {std.line_max_mm:g} mm thick on the printed page, the same weight on "
+        f"every outline of the page; never thinner hairlines and never heavier than {std.line_max_mm:g} mm."
+    ]
+    if std.tiny_region_allowance <= 60:
+        parts.append(
+            f"Colorable areas: every closed shape is at least {std.min_region_mm:g} mm across, big enough "
+            f"to color with a crayon; at most about {std.tiny_region_allowance} small closed shapes on the "
+            "whole page (eyes, buttons, small props). Draw grass, fur, hair, leaves, clouds and ground as a "
+            "few large simple shapes, not as many strokes; NO texture lines, NO hatching, NO stippling, NO "
+            "dotted or repeating patterns, NO small decorations filling the background, and no lines that "
+            "cross each other forming tiny cells. Leave plain white space instead of filling it."
+        )
+    else:
+        parts.append(
+            f"Keep each enclosed area at least {std.min_region_mm:g} mm across; no shading hatching or "
+            "solid gray fills."
+        )
+    return " ".join(parts)
 
 
 def default_context_prompt(config: BookConfig) -> str:

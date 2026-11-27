@@ -169,6 +169,7 @@ def test_page_job_uses_only_this_books_cast_designs_and_files() -> None:
     assert "Mia" not in job.prompt
     assert "The path always glows" in job.prompt
     assert job.style_reference is None  # no anchor yet and never another book's art
+    assert "Line weight standard" in job.prompt  # the line check's targets reach the model
 
 
 def test_scripts_forbid_new_named_characters_and_re_descriptions() -> None:

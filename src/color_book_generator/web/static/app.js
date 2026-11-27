@@ -1121,6 +1121,7 @@ function renderLinesPanel() {
     }),
   );
   $("#lines-thicken-all").classList.toggle("is-hidden", !r.pages.some((p) => p.fixable));
+  $("#lines-regenerate-slot").replaceChildren(...(r.off_standard?.length ? [offStandardButton(r.off_standard)] : []));
   $$("#page-list .page-card").forEach(renderPageLine);
 }
 
@@ -1147,6 +1148,68 @@ async function thickenLines(pageIndex = null) {
     );
   } catch (err) {
     toast(err.message, true);
+  }
+}
+
+// Regenerates, one at a time, the pages the line check flagged (thin, thick or too busy).
+async function regenerateOffStandard(indexes, button) {
+  const pages = indexes
+    .map((index) => state.session.pages.find((p) => p.index === index))
+    .filter((p) => p && !state.busyPages.has(p.index));
+  if (!pages.length) return;
+  const original = button.textContent;
+  button.disabled = true;
+  try {
+    for (const [i, page] of pages.entries()) {
+      button.textContent = `Gerando ${i + 1} de ${pages.length}…`;
+      await generateOnePage(page.index, page.prompt, page.caption_text, page.character_ids);
+    }
+    toast(`${plural(pages.length, "página fora do padrão gerada", "páginas fora do padrão geradas")} de novo. Gere o PDF de novo.`);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+function offStandardButton(indexes, onDone) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn btn-outline btn-sm";
+  button.textContent = `Gerar de novo ${plural(indexes.length, "página fora do padrão", "páginas fora do padrão")}`;
+  button.title = `Páginas ${indexes.join(", ")}`;
+  button.addEventListener("click", async () => {
+    await regenerateOffStandard(indexes, button);
+    await onDone?.();
+  });
+  return button;
+}
+
+async function runKdpPreflight() {
+  const result = $("#kdp-preflight-result");
+  result.replaceChildren();
+  try {
+    const report = await api(`/api/sessions/${state.sid}/kdp-preflight`);
+    const count = document.createElement("p");
+    const padded = report.kdp_pages > report.physical_pages ? ` (${report.kdp_pages - report.physical_pages} em branco para fechar o múltiplo)` : "";
+    count.textContent = `${report.profile_name || "Perfil"}: ${report.kdp_pages} páginas${padded}, margem da lombada ${report.gutter_mm ?? "?"} mm.`;
+    result.appendChild(count);
+    for (const [label, items] of [["Pendências", report.errors], ["Revisões", report.warnings]]) {
+      if (!items.length) continue;
+      const heading = document.createElement("strong");
+      heading.textContent = label;
+      const list = document.createElement("ul");
+      for (const message of items) {
+        const item = document.createElement("li");
+        item.textContent = message;
+        list.appendChild(item);
+      }
+      result.append(heading, list);
+    }
+    if (report.off_standard_pages?.length) {
+      result.appendChild(offStandardButton(report.off_standard_pages, runKdpPreflight));
+    }
+  } catch (err) {
+    result.textContent = err.message;
   }
 }
 
@@ -1701,31 +1764,7 @@ function bindEvents() {
       toast(err.message, true);
     }
   });
-  $("#kdp-preflight-btn").addEventListener("click", async () => {
-    const result = $("#kdp-preflight-result");
-    result.replaceChildren();
-    try {
-      const report = await api(`/api/sessions/${state.sid}/kdp-preflight`);
-      const count = document.createElement("p");
-      const padded = report.kdp_pages > report.physical_pages ? ` (${report.kdp_pages - report.physical_pages} em branco para fechar o múltiplo)` : "";
-      count.textContent = `${report.profile_name || "Perfil"}: ${report.kdp_pages} páginas${padded}, margem da lombada ${report.gutter_mm ?? "?"} mm.`;
-      result.appendChild(count);
-      for (const [label, items] of [["Pendências", report.errors], ["Revisões", report.warnings]]) {
-        if (!items.length) continue;
-        const heading = document.createElement("strong");
-        heading.textContent = label;
-        const list = document.createElement("ul");
-        for (const message of items) {
-          const item = document.createElement("li");
-          item.textContent = message;
-          list.appendChild(item);
-        }
-        result.append(heading, list);
-      }
-    } catch (err) {
-      result.textContent = err.message;
-    }
-  });
+  $("#kdp-preflight-btn").addEventListener("click", () => runKdpPreflight());
   $$(".step-tab").forEach((tab) => {
     tab.addEventListener("click", () => setStep(Number(tab.dataset.step)));
   });

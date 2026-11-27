@@ -96,6 +96,8 @@ class LineReport(BaseModel):
     tiny_region_allowance: int
     pages: list[PageLineStatus] = Field(default_factory=list)
     unmeasured: int = 0
+    # Pages with any line problem (thin, thick or too many tiny areas), in page order.
+    off_standard: list[int] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 
@@ -160,6 +162,7 @@ def build_line_report(state: SessionState, dpi: int) -> LineReport:
         tiny_region_allowance=std.tiny_region_allowance,
         pages=statuses,
         unmeasured=unmeasured,
+        off_standard=[s.index for s in statuses if s.problems],
         warnings=warnings,
     )
 
