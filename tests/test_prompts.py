@@ -20,7 +20,8 @@ def test_prompt_count_and_numbering() -> None:
 
 def test_subject_rotation_is_deterministic() -> None:
     cfg = BookConfig(theme="fox", pages=10)
-    assert default_subjects(cfg) == default_subjects(cfg)
+    first, second = default_subjects(cfg), default_subjects(cfg)
+    assert first == second
     assert len(default_subjects(cfg)) == 10
 
 

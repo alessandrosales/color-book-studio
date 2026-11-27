@@ -126,7 +126,8 @@ async def protect_host_and_origin(
 ) -> Response:
     host_header = (request.headers.get("host") or "").strip()
     if host_header:
-        parsed_host = urlsplit(f"http://{host_header}")
+        # A scheme-relative URL is enough for urlsplit to read host and port.
+        parsed_host = urlsplit(f"//{host_header}")
         hostname = (parsed_host.hostname or "").lower()
         if hostname not in _allowed_hosts():
             return JSONResponse(status_code=403, content={"detail": "invalid host header"})

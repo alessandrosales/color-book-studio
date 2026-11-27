@@ -2368,4 +2368,4 @@ async function init() {
   await Promise.all([refreshAuth(), pollAutopilot()]);
 }
 
-init();
+init().catch((err) => toast(`Não foi possível abrir o livro: ${err.message}`, true));

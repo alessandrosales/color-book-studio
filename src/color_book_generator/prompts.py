@@ -72,7 +72,7 @@ _FONT_STYLE_HINTS: dict[str, str] = {
 }
 
 _NO_TEXT_CONTEXT_RE = re.compile(
-    r",?\s*\b(?:no|zero)\s+(?:external\s+)?(?:text|captions?|speech\s+balloons?|speech\s+bubbles?|lettering)\b",
+    r"\b(?:no|zero)\s+(?:external\s+)?(?:text|captions?|speech\s+(?:balloons?|bubbles?)|lettering)\b",
     flags=re.IGNORECASE,
 )
 
@@ -90,11 +90,14 @@ _NEGATIVE_TEXT_TOKENS = {
 
 def strip_no_text_rules(context: str) -> str:
     """Remove 'no text' clauses from context when the page intentionally embeds text."""
+    # Each pattern matches in linear time: whitespace runs are collapsed first, so the
+    # later ones only ever see a single whitespace character before punctuation.
     cleaned = _NO_TEXT_CONTEXT_RE.sub("", context)
-    cleaned = re.sub(r"\s+([.,;:])", r"\1", cleaned)
-    cleaned = re.sub(r",\s*\.", ".", cleaned)
-    cleaned = re.sub(r"\.{2,}", ".", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s([.,;:])", r"\1", cleaned)
+    cleaned = re.sub(r",{2,}", ",", cleaned)
+    cleaned = cleaned.replace(",.", ".")
+    cleaned = re.sub(r"\.{2,}", ".", cleaned)
     return cleaned.strip()
 
 
@@ -120,7 +123,7 @@ def effective_negative_prompt(
 
 def _split_dialogue_lines(caption_text: str) -> list[str]:
     """Split multi-bubble dialogue separated by '|' or newlines into clean lines."""
-    parts = [p.strip() for p in re.split(r"\s*\|\s*|\n+", caption_text.strip()) if p.strip()]
+    parts = [p.strip() for p in caption_text.replace("\n", "|").split("|") if p.strip()]
     return parts or [caption_text.strip()]
 
 
