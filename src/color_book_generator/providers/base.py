@@ -17,6 +17,28 @@ class ProviderError(RuntimeError):
     pass
 
 
+def style_reference_note() -> str:
+    """How the model must read the book's style anchor (the first reference image)."""
+    return (
+        "The FIRST reference image is this book's STYLE ANCHOR: match its drawing style, line "
+        "weight, level of detail, white space and composition rhythm. It is a style guide "
+        "only: do not copy its scene, objects, characters or text."
+    )
+
+
+def character_reference_note(names: list[str], *, after_style: bool) -> str:
+    """How the model must read the character model sheets that follow."""
+    position = "The next" if after_style else "The"
+    listing = "; ".join(f"image {i}: {name}" for i, name in enumerate(names, start=1))
+    return (
+        f"{position} {len(names)} reference image(s) are the OFFICIAL CHARACTER MODEL SHEETS "
+        f"of this book, in this order ({listing}). Draw each of these characters exactly as "
+        "on its sheet: same species, face, proportions, hairstyle, outfit details and "
+        "signature prop. Pose and expression follow the scene. Any colors or photo lighting "
+        "in a reference are ignored: render in the requested line-art style."
+    )
+
+
 class ImageProvider(ABC):
     """A backend capable of producing a single line-art image."""
 

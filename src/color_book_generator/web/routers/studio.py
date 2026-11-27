@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import re
 import threading
 from datetime import datetime
@@ -21,13 +22,27 @@ from color_book_generator.brief import story_context as build_story_context
 from color_book_generator.config import (
     BookConfig,
     CaptionConfig,
-    ProcessingConfig,
     default_book_config_path,
     load_book_config,
 )
+from color_book_generator.identity import (
+    SHEET_SIZE,
+    CharacterDesign,
+    build_character_sheet_prompt,
+    cast_block,
+    design_character,
+    design_source,
+    match_cast_ids,
+    sheet_style_for,
+    style_anchor_prompt,
+)
 from color_book_generator.layout.pdf import compose_pdf
 from color_book_generator.page_layout import plan_page_layout
-from color_book_generator.presets import default_page_layout_for_category, get_preset
+from color_book_generator.presets import (
+    StylePreset,
+    default_page_layout_for_category,
+    get_preset,
+)
 from color_book_generator.print_profile import get_profile
 from color_book_generator.processing.caption import (
     render_text_page,
@@ -37,7 +52,7 @@ from color_book_generator.processing.line_art import (
     prepare_page,
     to_line_art,
 )
-from color_book_generator.prompts import compose_page_prompt, effective_negative_prompt
+from color_book_generator.prompts import PAGE_LAYOUT_PROMPTS
 from color_book_generator.providers import get_provider
 from color_book_generator.providers.base import generate_matching
 from color_book_generator.standards import caption_word_cap, page_beats, reading_standard
@@ -48,14 +63,13 @@ from color_book_generator.story import (
     ScriptedPage,
     StoryGenerationError,
     StoryMode,
-    build_character_sheet_prompt,
     generate_book_finishing,
     generate_bridge_page,
     generate_full_book_blueprint,
     generate_story_plan,
 )
 from color_book_generator.typography import detect_typography
-from color_book_generator.web import store
+from color_book_generator.web import book_pipeline, store
 from color_book_generator.web.line_check import finish_new_page
 from color_book_generator.web.reading import build_report
 from color_book_generator.web.store import (
@@ -65,6 +79,7 @@ from color_book_generator.web.store import (
     SessionState,
 )
 
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/sessions/{sid}", tags=["studio"])
 SID_RE = re.compile(r"^[a-f0-9]{8,32}$")
 MAX_IMAGE_UPLOAD_BYTES = 12 * 1024 * 1024
@@ -132,13 +147,21 @@ def _reading_warnings(state: SessionState) -> list[str]:
     return build_report(state, _session_book_cfg(state), _session_caption_cfg(state)).warnings
 
 
+def _apply_reading_font(state: SessionState) -> None:
+    """Raise the caption size to the audience's ideal when it is below the minimum."""
+    report = build_report(state, _session_book_cfg(state), _session_caption_cfg(state))
+    if report.caption_enabled and not report.font_ok:
+        state.caption_font_size = report.recommended_ratio
+
+
 def _story_premise(state: SessionState, premise: str = "") -> str:
-    """Premise typed in the story step, falling back to the briefing's idea."""
+    """Premise for the script: an explicit one, else the briefing (bible, core idea), else the old premise."""
+    bible = state.story_bible
     for candidate in (
         premise,
-        state.story_premise,
-        state.story_bible.logline if state.story_bible else "",
+        bible.logline if bible is not None and bible.locked else "",
         state.story_brief.logline,
+        state.story_premise,
     ):
         if candidate.strip():
             return candidate.strip()
@@ -160,6 +183,9 @@ class BookCharacterView(BaseModel):
     sheet_status: str
     error: str | None = None
     image_url: str | None = None
+    # Detailed design used in every prompt, and whether the sheet predates the description.
+    design: CharacterDesign | None = None
+    sheet_outdated: bool = False
 
 
 def _character_view(sid: str, item: BookCharacter) -> BookCharacterView:
@@ -174,11 +200,19 @@ def _character_view(sid: str, item: BookCharacter) -> BookCharacterView:
         sheet_status=item.sheet_status,
         error=item.error,
         image_url=f"/api/sessions/{sid}/characters/{item.id}/image?v={v}" if has_img else None,
+        design=item.design if book_pipeline.design_is_fresh(item) else None,
+        sheet_outdated=(
+            item.sheet_status == "ready"
+            and has_img
+            and bool(item.sheet_source)
+            and item.sheet_source != design_source(item.name, item.description)
+        ),
     )
 
 
 class StyleAnchorView(BaseModel):
-    url: str | None
+    url: str | None  # typography sample (text image used to detect the caption font)
+    anchor_url: str | None = None  # the book's own art style anchor
     inherited_global: bool = False
     font_family: str | None = None
     font_bold: bool | None = None
@@ -191,15 +225,21 @@ def _style_anchor_view(
     font_family = state.caption_font_family if state is not None else None
     font_bold = state.caption_font_bold if state is not None else None
     local = store.session_style_path(sid)
-    if local.exists():
-        return StyleAnchorView(
-            url=f"/api/sessions/{sid}/style/image?v={int(local.stat().st_mtime)}",
-            inherited_global=False,
-            font_family=font_family,
-            font_bold=font_bold,
-        )
+    anchor = store.session_anchor_path(sid)
     return StyleAnchorView(
-        url=None, inherited_global=False, font_family=font_family, font_bold=font_bold
+        url=(
+            f"/api/sessions/{sid}/style/image?v={int(local.stat().st_mtime)}"
+            if local.exists()
+            else None
+        ),
+        anchor_url=(
+            f"/api/sessions/{sid}/style/anchor?v={int(anchor.stat().st_mtime)}"
+            if anchor.exists()
+            else None
+        ),
+        inherited_global=False,
+        font_family=font_family,
+        font_bold=font_bold,
     )
 
 
@@ -265,7 +305,7 @@ def _find_extra_page(
 
 
 def _render_extra_page(state: SessionState, page: ExtraPage) -> None:
-    cfg = _config()
+    cfg = _session_book_cfg(state)
     background_path = store.extra_page_background_path(state.id, page.id)
     background = (
         Image.open(background_path) if background_path.exists() else None
@@ -405,41 +445,82 @@ class GenerateStyleRequest(BaseModel):
 @router.post("/style/generate", response_model=StyleAnchorView)
 async def generate_session_style(sid: str, body: GenerateStyleRequest) -> StyleAnchorView:
     state = _session(sid)
-    cfg = _config()
+    cfg = _session_book_cfg(state)
     provider_name = body.provider or state.provider
     model_name = body.model or state.model
     if provider_name == "codex":
         model_name = normalize_codex_model(model_name)
-    subject = body.sample_subject.strip() or (
-        "a charming cozy showcase scene demonstrating the exact line weight, "
-        "composition balance, and visual identity of this coloring book"
-    )
-    prompt = f"{state.context_prompt.strip()}\n\nStyle anchor showcase subject: {subject}."
-    negative = state.negative_prompt or cfg.negative_prompt
-    processing = state.processing or cfg.processing
-    category_style_ref = store.load_page_layout_reference_bytes(
-        state.category, 1, preset_id=state.preset_id
-    )
-
-    def _run() -> Image.Image:
-        provider = get_provider(provider_name, model_name)
-        img = generate_matching(
-            provider,
-            prompt,
-            target_size=(1024, 1024),
-            negative_prompt=negative,
-            style_reference=category_style_ref,
-        )
-        return to_line_art(img, processing)
-
     try:
-        line_art = await asyncio.to_thread(_run)
+        await asyncio.to_thread(
+            _generate_anchor,
+            state,
+            cfg,
+            provider_name,
+            model_name,
+            body.sample_subject.strip(),
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
-    line_art.save(store.session_style_path(sid), "PNG")
     return _style_anchor_view(sid, state)
+
+
+def _generate_anchor(
+    state: SessionState,
+    cfg: BookConfig,
+    provider_name: str,
+    model_name: str,
+    world: str = "",
+) -> None:
+    """Draw and save the book's own style anchor (text only: no other book's art)."""
+    layout = state.page_layout or default_page_layout_for_category(state.category)
+    # The category sample page shows the expected page format. It is sent only here, to a
+    # drawing with no characters; pages then follow this book's own anchor, so nothing
+    # from the sample (its animals, scene or text) reaches the book's pages.
+    layout_ref = store.category_reference_bytes(state.category)
+    prompt = style_anchor_prompt(
+        style_context=state.context_prompt,
+        world=world or book_pipeline.book_world(state),
+        page_layout_rule=PAGE_LAYOUT_PROMPTS.get(layout, ""),
+        layout_reference=layout_ref is not None,
+    )
+    provider = get_provider(provider_name, model_name)
+    img = generate_matching(
+        provider,
+        prompt,
+        target_size=cfg.image_px,
+        negative_prompt=state.negative_prompt or cfg.negative_prompt,
+        style_reference=layout_ref,
+    )
+    line_art = to_line_art(img, state.processing or cfg.processing)
+    buf = io.BytesIO()
+    line_art.save(buf, "PNG")
+    store.save_session_anchor(state.id, buf.getvalue())
+
+
+def ensure_book_anchor(state: SessionState, provider_name: str, model_name: str) -> None:
+    """Every generation of a book starts from its anchor, drawn from the category standard.
+
+    Called before any sheet, page, cover or frame-page generation, so all books of a
+    category share the same page format and each book keeps one style from its first image.
+    """
+    if store.session_anchor_path(state.id).exists():
+        return
+    _generate_anchor(state, _session_book_cfg(state), provider_name, _model_for(provider_name, model_name))
+
+
+@router.get("/style/anchor")
+def session_style_anchor_image(sid: str) -> FileResponse:
+    _session(sid)
+    path = store.session_anchor_path(sid)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="ancora de estilo do livro nao gerada")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.delete("/style/anchor", status_code=204)
+def delete_session_style_anchor(sid: str) -> None:
+    _session(sid)
+    store.session_anchor_path(sid).unlink(missing_ok=True)
 
 
 @router.delete("/style", status_code=204)
@@ -557,10 +638,8 @@ def _compose_cover_prompt(
     state: SessionState, title: str, direction: str, color: bool
 ) -> str:
     memory = _cover_story_memory(state)
-    characters = "; ".join(
-        f"{c.name}: {c.description.strip()}".strip(": ")
-        for c in state.characters
-        if c.name.strip()
+    characters = "\n".join(
+        f"- {book_pipeline.design_text(c)}" for c in state.characters if c.name.strip()
     )
     parts = [
         state.context_prompt.strip(),
@@ -573,7 +652,11 @@ def _compose_cover_prompt(
         + memory
         if memory
         else "",
-        f"MAIN CHARACTERS: {characters}" if characters else "",
+        (
+            "MAIN CHARACTERS (identical to their model sheet reference images):\n" + characters
+            if characters
+            else ""
+        ),
         (
             "COVER OVERRIDE: ignore any black-and-white, line-art-only or 'no text' "
             "instruction from the book context for this cover. Create one single "
@@ -619,11 +702,12 @@ async def _render_cover(
     model_name: str,
 ) -> None:
     """Generate and save the cover; on failure mark it as error and re-raise."""
-    cfg = _config()
+    cfg = _session_book_cfg(state)
     sid = state.id
     state.cover_title = title.strip()
     state.cover_prompt = direction.strip()
     state.cover_color = color
+    await asyncio.to_thread(ensure_book_anchor, state, provider_name, model_name)
     prompt = _compose_cover_prompt(state, title, direction, color)
     negative = _cover_negative_prompt(state.negative_prompt or cfg.negative_prompt, color)
     processing = state.processing or cfg.processing
@@ -936,10 +1020,10 @@ async def _render_extra_visual(
 ) -> None:
     """Lay out and illustrate one text page; on failure mark it as error and re-raise."""
     sid = state.id
-    cfg = _config()
+    cfg = _session_book_cfg(state)
     processing = state.processing or cfg.processing
+    await asyncio.to_thread(ensure_book_anchor, state, provider_name, model_name)
     style_bytes = store.load_session_style_bytes(sid)
-    refs = _character_refs(state)
 
     page.status = "generating"
     page.error = None
@@ -974,6 +1058,9 @@ async def _render_extra_visual(
         return
 
     art_subject = layout.image_prompt.strip() or page.prompt.strip()
+    shown = match_cast_ids([], f"{art_subject} {page.prompt}", [(c.id, c.name) for c in state.characters])
+    by_id = {c.id: c for c in state.characters}
+    refs = book_pipeline.character_references(state, shown)
     art_instruction = (
         "Create a decorative black-and-white line-art frame or background for a "
         "text page of this book. Keep the central area mostly clear/white so the "
@@ -989,6 +1076,7 @@ async def _render_extra_visual(
             state.context_prompt.strip(),
             "INTERIOR TEXT PAGE ART DIRECTION:\n" + art_subject,
             f"PAGE TITLE CONTEXT: {page.title.strip()}" if page.title.strip() else "",
+            cast_block([book_pipeline.design_text(by_id[cid]) for cid in shown]) if shown else "",
             art_instruction
             + " Do not render any text, letters, numbers, or watermarks.",
         ]
@@ -1108,6 +1196,8 @@ async def create_book_character(
                 ) from exc
             store.session_characters_dir(sid).mkdir(parents=True, exist_ok=True)
             normalized.save(store.session_characters_dir(sid) / f"{cid}.png", "PNG")
+            # Keep the author's original: it is the identity reference for future sheets.
+            normalized.save(store.session_characters_dir(sid) / f"{cid}-upload.png", "PNG")
             has_image = True
 
     record = BookCharacter(
@@ -1164,67 +1254,97 @@ class CharacterSheetGenerateRequest(BaseModel):
     model: str | None = None
 
 
+def _preset_of(state: SessionState) -> StylePreset | None:
+    return get_preset(state.preset_id, store.load_custom_presets()) if state.preset_id else None
+
+
+async def _ensure_design(state: SessionState, char: BookCharacter) -> None:
+    """Expand the character's description into a detailed design (once per description).
+
+    A failure leaves the free-text description in use: the sheet is still generated.
+    """
+    if book_pipeline.design_is_fresh(char):
+        return
+    try:
+        design = await asyncio.to_thread(
+            design_character,
+            name=char.name,
+            description=char.description,
+            category=state.category,
+            style_context=state.context_prompt,
+            story_context=_story_context(state),
+            others=[c.name for c in state.characters if c.id != char.id],
+            provider=state.provider,
+            model=_model_for(state.provider, state.model),
+        )
+    except Exception:
+        log.warning("character design failed for %s; using its description", char.name)
+        return
+    char.design = design
+    char.design_source = design_source(char.name, char.description)
+
+
+async def _render_sheet(
+    state: SessionState,
+    char: BookCharacter,
+    provider_name: str,
+    model_name: str,
+) -> None:
+    """Design (if needed) and draw one character's model sheet in the book's own style."""
+    cfg = _session_book_cfg(state)
+    await asyncio.to_thread(ensure_book_anchor, state, provider_name, model_name)
+    await _ensure_design(state, char)
+    prompt = build_character_sheet_prompt(
+        name=char.name,
+        design_text=book_pipeline.design_text(char),
+        style_context=state.context_prompt,
+        sheet_style=sheet_style_for(_preset_of(state)),
+    )
+    upload = book_pipeline.upload_path(state, char)
+    identity_refs = [(char.name, upload.read_bytes())] if upload.exists() else None
+    style_bytes = store.load_session_style_bytes(state.id)
+
+    def _run() -> Image.Image:
+        provider = get_provider(provider_name, model_name)
+        img = generate_matching(
+            provider,
+            prompt,
+            target_size=SHEET_SIZE,
+            negative_prompt=state.negative_prompt or cfg.negative_prompt,
+            references=identity_refs,
+            style_reference=style_bytes,
+        )
+        return to_line_art(img, state.processing or cfg.processing)
+
+    sheet = await asyncio.to_thread(_run)
+    chars_dir = store.session_characters_dir(state.id)
+    chars_dir.mkdir(parents=True, exist_ok=True)
+    sheet.save(chars_dir / char.filename, "PNG")
+    char.sheet_status = "ready"
+    char.approved = True
+    char.error = None
+    char.sheet_source = design_source(char.name, char.description)
+    char.updated_at = datetime.now()
+
+
 @router.post("/characters/{cid}/generate-sheet", response_model=BookCharacterView)
 async def generate_character_sheet(
     sid: str, cid: str, body: CharacterSheetGenerateRequest
 ) -> BookCharacterView:
     state = _session(sid)
     char = _book_character(state, cid)
-    cfg = _config()
 
     if body.description is not None and body.description.strip():
         char.description = body.description.strip()
 
     provider_name = body.provider or state.provider
-    model_name = body.model or state.model
-    if provider_name == "codex":
-        model_name = normalize_codex_model(model_name)
-
-    preset = (
-        get_preset(state.preset_id, store.load_custom_presets())
-        if state.preset_id
-        else None
-    )
-    sheet_prompt = build_character_sheet_prompt(
-        char.name,
-        char.description,
-        state.context_prompt,
-        preset.character_sheet_prompt if preset else "",
-    )
-    negative = state.negative_prompt or cfg.negative_prompt
-    processing = state.processing or cfg.processing
-    style_bytes = store.effective_style_reference_bytes(
-        sid, state.category, 1, preset_id=state.preset_id
-    )
-
-    existing_img_path = store.session_characters_dir(sid) / char.filename
-    ref_list: list[tuple[str, bytes]] | None = None
-    if existing_img_path.exists():
-        ref_list = [(char.name, existing_img_path.read_bytes())]
+    model_name = _model_for(provider_name, body.model or state.model)
 
     char.sheet_status = "generating"
     char.error = None
     store.save_session(state)
-
-    def _run() -> Image.Image:
-        provider = get_provider(provider_name, model_name)
-        img = generate_matching(
-            provider,
-            sheet_prompt,
-            target_size=(1536, 1024),
-            negative_prompt=negative,
-            references=ref_list,
-            style_reference=style_bytes,
-        )
-        return to_line_art(img, processing)
-
     try:
-        sheet = await asyncio.to_thread(_run)
-        store.session_characters_dir(sid).mkdir(parents=True, exist_ok=True)
-        sheet.save(store.session_characters_dir(sid) / char.filename, "PNG")
-        char.sheet_status = "ready"
-        char.approved = True
-        char.updated_at = datetime.now()
+        await _render_sheet(state, char, provider_name, model_name)
     except Exception as exc:
         char.sheet_status = "error"
         char.error = str(exc)
@@ -1262,6 +1382,7 @@ def delete_book_character(sid: str, cid: str) -> None:
     if len(remaining) == len(state.characters):
         raise HTTPException(status_code=404, detail="personagem nao encontrado")
     (store.session_characters_dir(sid) / f"{cid}.png").unlink(missing_ok=True)
+    (store.session_characters_dir(sid) / f"{cid}-upload.png").unlink(missing_ok=True)
     state.characters = remaining
     for page in state.pages:
         if cid in page.character_ids:
@@ -1364,6 +1485,7 @@ async def generate_story(sid: str, body: StoryGenerateRequest) -> StoryStateView
     state.story_synopsis = plan.synopsis
     if any(p.caption_text.strip() for p in plan.pages):
         state.caption_enabled = True
+    _apply_reading_font(state)
     if body.apply_title and plan.title:
         state.title = plan.title
 
@@ -1386,8 +1508,7 @@ async def generate_story(sid: str, body: StoryGenerateRequest) -> StoryStateView
                 title=scripted.title,
                 prompt=scripted.scene_prompt,
                 caption_text=scripted.caption_text,
-                character_ids=scripted.character_ids
-                or [c.id for c in state.characters if c.approved],
+                character_ids=scripted.character_ids or book_pipeline.fallback_cast_ids(state),
                 beat=scripted.beat,
                 status="pending",
             )
@@ -1498,12 +1619,7 @@ async def insert_contextual_page(
     except StoryGenerationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    fallback_chars = (
-        list(prev_page.character_ids)
-        if prev_page and prev_page.character_ids
-        else [c.id for c in state.characters if c.approved]
-    )
-    char_ids = scripted.character_ids or fallback_chars
+    char_ids = scripted.character_ids or book_pipeline.fallback_cast_ids(state)
 
     new_page = PageState(
         index=new_index,
@@ -1707,12 +1823,10 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
         if req.resume and _reset_stuck_generating(state):
             store.save_session(state)
 
-        # Phase 1: Full Book Blueprint (skipped when resuming an existing plan)
-        anchor_subject = (
-            state.pages[0].prompt
-            if state.pages and state.pages[0].prompt.strip()
-            else (state.story_premise or state.title or "iconic showcase scene")
-        )
+        # Phase 1: Full Book Blueprint (skipped when resuming an existing plan).
+        # The cast is fixed whenever the book already has one (its characters or the
+        # locked story bible): the script then uses exactly those characters, with the
+        # same ids, designs and sheets, instead of inventing a new cast every run.
         need_blueprint = not (req.resume and _has_existing_blueprint(state))
         if need_blueprint:
             if _is_cancelled():
@@ -1726,6 +1840,12 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 percent=8,
                 current_step=1,
             )
+            if state.story_bible is not None and state.story_bible.locked:
+                book_pipeline.sync_bible_cast(state)
+            fixed_cast = [
+                CharacterBrief(id=c.id, name=c.name, description=c.description)
+                for c in state.characters
+            ]
             blueprint = await asyncio.to_thread(
                 generate_full_book_blueprint,
                 pages=target_pages,
@@ -1737,6 +1857,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                 story_context=_story_context(state),
                 page_beats=_page_beats(state, target_pages),
                 caption_max_words=_caption_cap(state),
+                fixed_cast=fixed_cast or None,
                 provider=provider_name,
                 model=model_name,
             )
@@ -1750,28 +1871,22 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             state.story_premise = blueprint.premise
             state.story_synopsis = blueprint.synopsis
             state.story_mode = blueprint.mode
-            anchor_subject = blueprint.style_anchor_subject
+            _apply_reading_font(state)
 
-            # Register generated characters into this book
-            char_id_by_name: dict[str, str] = {}
-            new_characters: list[BookCharacter] = []
-            for gen_char in blueprint.characters:
-                cid = store.new_character_id()
-                char_id_by_name[gen_char.name.strip().lower()] = cid
-                new_characters.append(
+            if not fixed_cast:
+                state.characters = [
                     BookCharacter(
-                        id=cid,
+                        id=store.new_character_id(),
                         name=gen_char.name,
                         description=gen_char.description,
                         approved=False,
                         sheet_status="empty",
                         updated_at=datetime.now(),
                     )
-                )
-            state.characters = new_characters
+                    for gen_char in blueprint.characters
+                ]
 
-            # Populate all pages with visual prompt, caption, and character links
-            all_char_ids = [c.id for c in state.characters]
+            cast_pairs = [(c.id, c.name) for c in state.characters]
             state.pages = [
                 PageState(
                     index=p.index,
@@ -1780,14 +1895,8 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
                     caption_text=p.caption_text,
                     beat=p.beat,
                     character_ids=(
-                        list(
-                            dict.fromkeys(
-                                char_id_by_name[n.lower()]
-                                for n in p.character_names
-                                if n.lower() in char_id_by_name
-                            )
-                        )
-                        or all_char_ids
+                        match_cast_ids(p.character_names, p.scene_prompt, cast_pairs)
+                        or book_pipeline.fallback_cast_ids(state)
                     ),
                     status="pending",
                 )
@@ -1817,64 +1926,31 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
         def _pct() -> int:
             return 15 + int((done_img_steps / max(1, total_img_steps)) * 80)
 
-        # Phase 2: Ensure Style Anchor Image (use built-in category reference directly when available)
+        # Phase 2: the book's own style anchor, drawn from the category standard (no characters).
         if _is_cancelled():
             _finish_cancelled("style_anchor", _pct(), 1)
             return
-
-        if not store.session_style_path(sid).exists():
-            category_ref = store.load_page_layout_reference_bytes(
-                state.category, 1, preset_id=state.preset_id
+        if not store.session_anchor_path(sid).exists():
+            _set_autopilot(
+                sid,
+                status="running",
+                phase="style_anchor",
+                label="Gerando âncora visual de estilo do livro…",
+                percent=_pct(),
+                current_step=1,
             )
-            if category_ref is not None:
-                store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
-                store.session_style_path(sid).write_bytes(category_ref)
-            else:
-                _set_autopilot(
-                    sid,
-                    status="running",
-                    phase="style_anchor",
-                    label="Gerando âncora visual de estilo do livro…",
-                    percent=_pct(),
-                    current_step=1,
-                )
-                anchor_prompt = (
-                    f"{state.context_prompt.strip()}\n\n"
-                    f"Style anchor showcase subject: {anchor_subject}."
-                )
-
-                def _gen_anchor() -> Image.Image:
-                    provider = get_provider(provider_name, model_name)
-                    img = generate_matching(
-                        provider,
-                        anchor_prompt,
-                        target_size=cfg.image_px,
-                        negative_prompt=cfg.negative_prompt,
-                    )
-                    return to_line_art(img, cfg.processing)
-
-                anchor_img = await asyncio.to_thread(_gen_anchor)
-                store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
-                anchor_img.save(store.session_style_path(sid), "PNG")
+            await asyncio.to_thread(ensure_book_anchor, state, provider_name, model_name)
         done_img_steps += 1
         if _is_cancelled():
             _finish_cancelled("style_anchor", _pct(), 1)
             return
-        style_bytes = store.effective_style_reference_bytes(
-        sid, state.category, 1, preset_id=state.preset_id
-    )
 
-        # Phase 3: Generate Character Sheets (skip already-ready sheets on resume)
-        chars_dir = store.session_characters_dir(sid)
+        # Phase 3: detailed design + model sheet per character (kept when still current).
         for idx, char in enumerate(state.characters, start=1):
             if _is_cancelled():
                 _finish_cancelled("sheets", _pct(), 2)
                 return
-            if (
-                req.resume
-                and char.sheet_status == "ready"
-                and (chars_dir / char.filename).exists()
-            ):
+            if book_pipeline.sheet_is_fresh(state, char):
                 done_img_steps += 1
                 continue
             _set_autopilot(
@@ -1887,30 +1963,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             )
             char.sheet_status = "generating"
             store.save_session(state)
-            sheet_prompt = build_character_sheet_prompt(
-                char.name,
-                char.description,
-                state.context_prompt,
-                preset.character_sheet_prompt if preset else "",
-            )
-
-            def _gen_sheet(prompt_text: str = sheet_prompt) -> Image.Image:
-                provider = get_provider(provider_name, model_name)
-                img = generate_matching(
-                    provider,
-                    prompt_text,
-                    target_size=(1536, 1024),
-                    negative_prompt=cfg.negative_prompt,
-                    style_reference=style_bytes,
-                )
-                return to_line_art(img, cfg.processing)
-
-            sheet_img = await asyncio.to_thread(_gen_sheet)
-            chars_dir.mkdir(parents=True, exist_ok=True)
-            sheet_img.save(chars_dir / char.filename, "PNG")
-            char.sheet_status = "ready"
-            char.approved = True
-            char.updated_at = datetime.now()
+            await _render_sheet(state, char, provider_name, model_name)
             state.current_step = 2
             store.save_session(state)
             done_img_steps += 1
@@ -1929,8 +1982,7 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             )
             return
 
-        # Phase 4: Generate Every Page with Style Anchor + Character Sheets (skip done pages on resume)
-        char_by_id = {c.id: c for c in state.characters}
+        # Phase 4: every page from the same recipe: style anchor + cast sheets + designs.
         pages_dir = store.pages_dir(sid)
         for page in state.pages:
             if _is_cancelled():
@@ -1953,72 +2005,22 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             state.current_step = 3
             store.save_session(state)
 
-            effective_layout = state.page_layout or default_page_layout_for_category(state.category)
-            embedded_text = page.caption_text.strip() if state.caption_enabled else ""
-            full_prompt = compose_page_prompt(
-                state.context_prompt,
-                page.prompt,
-                page.index,
-                len(state.pages),
-                page_layout=effective_layout,
-                caption_text=embedded_text,
-                caption_position=state.caption_position,
-                caption_font_family=state.caption_font_family,
-                caption_font_bold=state.caption_font_bold,
-            )
-            page_negative = effective_negative_prompt(
-                cfg.negative_prompt,
-                has_embedded_text=bool(embedded_text),
-                page_layout=effective_layout,
-            )
-            page_processing = (
-                cfg.processing.model_copy(
-                    update={"min_component_px": min(cfg.processing.min_component_px, 12)}
-                )
-                if embedded_text
-                else cfg.processing
-            )
-            char_notes = [
-                f"{char_by_id[cid].name}: {char_by_id[cid].description}"
-                for cid in page.character_ids
-                if cid in char_by_id and char_by_id[cid].description.strip()
-            ]
-            if char_notes:
-                full_prompt = f"{full_prompt}\n\nCharacters in this scene: {'; '.join(char_notes)}."
-
-            refs: list[tuple[str, bytes]] = []
-            for cid in page.character_ids:
-                char_item = char_by_id.get(cid)
-                if char_item is None:
-                    continue
-                cpath = chars_dir / char_item.filename
-                if cpath.exists():
-                    refs.append((char_item.name, cpath.read_bytes()))
+            job = book_pipeline.page_job(state, page, cfg)
 
             def _gen_page(
-                prompt_text: str = full_prompt,
-                page_refs: list[tuple[str, bytes]] = refs,
-                page_neg: str = page_negative,
-                proc_cfg: ProcessingConfig = page_processing,
-                page_idx: int = page.index,
+                page_job: book_pipeline.ImageJob = job,
                 page_state: PageState = page,
             ) -> tuple[Image.Image, Image.Image]:
                 provider = get_provider(provider_name, model_name)
-                effective_style = (
-                    style_bytes
-                    or store.load_page_layout_reference_bytes(
-                        state.category, page_idx, preset_id=state.preset_id
-                    )
-                )
                 raw_img = generate_matching(
                     provider,
-                    prompt_text,
+                    page_job.prompt,
                     target_size=cfg.image_px,
-                    negative_prompt=page_neg,
-                    references=page_refs or None,
-                    style_reference=effective_style,
+                    negative_prompt=page_job.negative_prompt,
+                    references=page_job.references or None,
+                    style_reference=page_job.style_reference,
                 )
-                proc = prepare_page(raw_img, cfg.image_px, proc_cfg)
+                proc = prepare_page(raw_img, cfg.image_px, page_job.processing)
                 proc = finish_new_page(state, page_state, proc, cfg.dpi)
                 return raw_img, proc
 

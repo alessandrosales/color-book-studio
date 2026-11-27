@@ -12,7 +12,7 @@ import tempfile
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -51,16 +51,14 @@ from color_book_generator.presets import default_page_layout_for_category, get_p
 from color_book_generator.print_profile import PRINT_PROFILES, PrintProfile, get_profile
 from color_book_generator.processing.line_art import prepare_page, score_line_art
 from color_book_generator.prompts import (
-    compose_page_prompt,
     default_context_prompt,
     default_subjects,
-    effective_negative_prompt,
 )
 from color_book_generator.providers import available_providers, get_provider
 from color_book_generator.providers.base import generate_matching
 from color_book_generator.story import StoryMode
 from color_book_generator.web import archive as backup_archive
-from color_book_generator.web import store
+from color_book_generator.web import book_pipeline, store
 from color_book_generator.web.auth_flow import flow as codex_flow
 from color_book_generator.web.line_check import build_line_report, finish_new_page
 from color_book_generator.web.reading import build_report
@@ -74,6 +72,7 @@ from color_book_generator.web.routers.studio import (
     _render_extra_page,
     _style_anchor_view,
     autopilot_snapshot,
+    ensure_book_anchor,
     read_upload_limited,
 )
 from color_book_generator.web.routers.studio import (
@@ -406,6 +405,7 @@ class SessionView(BaseModel):
     processing: ProcessingConfig | None = None
     characters: list[BookCharacterView] = Field(default_factory=list)
     style_url: str | None = None
+    style_anchor_url: str | None = None
     style_inherited_global: bool = False
     story_mode: StoryMode = "narrative"
     story_premise: str = ""
@@ -478,6 +478,56 @@ def _session_cfg(state: SessionState) -> BookConfig:
     return cfg.model_copy(update=updates)
 
 
+_BATCH_GAP_SECONDS = 20
+
+
+def _manual_generation_snapshot(state: SessionState) -> AutopilotStatus | None:
+    """Generation started outside the autopilot ("Gerar pendentes", one page, a sheet, the cover)."""
+    pages = sorted(state.pages, key=lambda p: p.index)
+    total = len(pages)
+    done = sum(1 for p in pages if p.status == "done")
+    current = next((p for p in pages if p.status == "generating"), None)
+    if current is None:
+        # Between two pages of "Gerar pendentes" nothing is generating for a moment:
+        # a page finished seconds ago with pending pages left still counts as running.
+        recent = datetime.now() - timedelta(seconds=_BATCH_GAP_SECONDS)
+        just_done = any(p.status == "done" and p.updated_at and p.updated_at > recent for p in pages)
+        current = next((p for p in pages if p.status == "pending"), None) if just_done else None
+    if current is not None:
+        label = f"Ilustrando página {current.index} de {total}…"
+    elif any(c.sheet_status == "generating" for c in state.characters):
+        label = "Gerando folha de personagem…"
+    elif state.cover_status == "generating":
+        label = "Criando a capa…"
+    elif any(
+        e.status == "generating" for e in (*state.front_extra_pages, *state.back_extra_pages)
+    ):
+        label = "Ilustrando páginas de abertura e encerramento…"
+    else:
+        return None
+    return AutopilotStatus(
+        status="running",
+        phase="manual",
+        label=label,
+        percent=round(done / total * 100) if total else 0,
+    )
+
+
+def _interrupted_snapshot(state: SessionState) -> AutopilotStatus | None:
+    """A generation cut short by a server restart (its live status is gone with the process)."""
+    interrupted = any(
+        item.error == store.INTERRUPTED_MESSAGE
+        for item in (*state.pages, *state.front_extra_pages, *state.back_extra_pages)
+    ) or any(c.error == store.INTERRUPTED_MESSAGE for c in state.characters)
+    if not interrupted and state.cover_error != store.INTERRUPTED_MESSAGE:
+        return None
+    return AutopilotStatus(
+        status="error",
+        phase="interrupted",
+        label="A geração foi interrompida (o servidor reiniciou). Abra o livro para continuar de onde parou.",
+    )
+
+
 def _session_view(state: SessionState) -> SessionView:
     cfg = _session_cfg(state)
     has_pdf = state.pdf_ready and (store.session_dir(state.id) / "book.pdf").exists()
@@ -509,6 +559,7 @@ def _session_view(state: SessionState) -> SessionView:
         processing=cfg.processing,
         characters=[_book_character_view(state.id, c) for c in state.characters],
         style_url=style_anchor.url,
+        style_anchor_url=style_anchor.anchor_url,
         style_inherited_global=style_anchor.inherited_global,
         story_mode=state.story_mode,
         story_premise=state.story_premise,
@@ -642,34 +693,9 @@ def _character_view(record: store.CharacterRecord) -> CharacterReferencePayload:
     )
 
 
-def _load_references(ids: list[str], state: SessionState | None = None) -> list[tuple[str, bytes]]:
-    if not ids:
-        return []
-    book_records = {c.id: c for c in (state.characters if state is not None else [])}
-    global_records = {record.id: record for record in store.load_characters()}
-    references: list[tuple[str, bytes]] = []
-    for cid in ids:
-        if state is not None and cid in book_records:
-            char = book_records[cid]
-            book_path = store.session_characters_dir(state.id) / char.filename
-            if book_path.exists():
-                references.append((char.name, book_path.read_bytes()))
-                continue
-            if cid not in global_records:
-                # Character registered in the book without an image yet: skip binary ref gracefully
-                continue
-        record = global_records.get(cid)
-        if record is None:
-            raise HTTPException(
-                status_code=400, detail=f"personagem nao encontrado: {cid}"
-            )
-        path = store.characters_dir() / record.filename
-        if not path.exists():
-            raise HTTPException(
-                status_code=400, detail=f"imagem do personagem ausente: {record.name}"
-            )
-        references.append((record.name, path.read_bytes()))
-    return references
+def _load_references(ids: list[str], state: SessionState) -> list[tuple[str, bytes]]:
+    """Model sheets of this book's own characters (never the global registry)."""
+    return book_pipeline.character_references(state, ids)
 
 
 class StyleView(BaseModel):
@@ -770,10 +796,8 @@ def use_page_as_style(sid: str, index: int) -> StyleView:
     source = store.pages_dir(sid) / f"page-{index:03d}.png"
     if not source.exists():
         raise HTTPException(status_code=400, detail="pagina ainda nao gerada")
-    data = source.read_bytes()
-    store.session_style_dir(sid).mkdir(parents=True, exist_ok=True)
-    store.session_style_path(sid).write_bytes(data)
-    return StyleView(url=_style_anchor_view(sid).url)
+    store.save_session_anchor(sid, source.read_bytes())
+    return StyleView(url=_style_anchor_view(sid).anchor_url)
 
 
 @app.get("/api/characters", response_model=list[CharacterReferencePayload])
@@ -1170,8 +1194,20 @@ def list_sessions() -> list[SessionSummary]:
             continue
         if state is None:
             continue
-        done_pages = [page for page in state.pages if page.status == "done"]
-        cover = done_pages[0] if done_pages else None
+        done_pages = sorted(
+            (page for page in state.pages if page.status == "done"), key=lambda p: p.index
+        )
+        first_page = done_pages[0] if done_pages else None
+        cover_file = store.cover_path(state.id)
+        if state.cover_status == "done" and cover_file.exists():
+            # The library shows the book's cover; without one, its first finished page.
+            cover_version = int(cover_file.stat().st_mtime)
+            cover_url: str | None = f"/api/sessions/{state.id}/cover/preview?v={cover_version}"
+        elif first_page is not None:
+            page_version = int((first_page.updated_at or state.created_at).timestamp())
+            cover_url = f"/api/sessions/{state.id}/pages/{first_page.index}/view?v={page_version}"
+        else:
+            cover_url = None
         summaries.append(
             SessionSummary(
                 id=state.id,
@@ -1181,17 +1217,16 @@ def list_sessions() -> list[SessionSummary]:
                 updated_at=backup_archive.session_activity(state),
                 provider=state.provider,
                 model=state.model,
-                cover_url=(
-                    f"/api/sessions/{state.id}/pages/{cover.index}/view"
-                    f"?v={int((cover.updated_at or state.created_at).timestamp())}"
-                    if cover is not None
-                    else None
-                ),
+                cover_url=cover_url,
                 preset_id=state.preset_id,
                 category=state.category,
                 page_size=state.page_size,
                 characters_count=len(state.characters),
-                autopilot=autopilot_snapshot(state.id),
+                autopilot=(
+                    autopilot_snapshot(state.id)
+                    or _manual_generation_snapshot(state)
+                    or _interrupted_snapshot(state)
+                ),
             )
         )
     summaries.sort(
@@ -1320,38 +1355,19 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
         page.caption_text = body.caption_text.strip()
     if body.character_ids is not None:
         page.character_ids = body.character_ids
+        # A character picked from the global registry becomes this book's own copy.
+        store.migrate_referenced_characters(state)
     seed = body.seed if body.seed is not None else cfg.seed
     candidates = body.candidates or cfg.candidates
-    effective_layout = state.page_layout or default_page_layout_for_category(state.category)
-    embedded_text = page.caption_text.strip() if state.caption_enabled else ""
-    full_prompt = compose_page_prompt(
-        context,
-        page.prompt,
-        index,
-        len(state.pages),
-        page_layout=effective_layout,
-        caption_text=embedded_text,
-        caption_position=state.caption_position,
-        caption_font_family=state.caption_font_family,
-        caption_font_bold=state.caption_font_bold,
-    )
-    negative_prompt = effective_negative_prompt(
-        cfg.negative_prompt,
-        has_embedded_text=bool(embedded_text),
-        page_layout=effective_layout,
-    )
-    # Enrich prompt with textual character descriptions for selected book characters
-    char_notes = [
-        f"{c.name}: {c.description}"
-        for c in state.characters
-        if c.id in page.character_ids and c.description.strip()
-    ]
-    if char_notes:
-        full_prompt = f"{full_prompt}\n\nCharacters in this scene: {'; '.join(char_notes)}."
-    references = _load_references(page.character_ids, state)
-    style_reference = store.effective_style_reference_bytes(
-        sid, state.category, index, preset_id=state.preset_id
-    )
+    try:
+        await asyncio.to_thread(ensure_book_anchor, state, state.provider, state.model)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"nao foi possivel criar a ancora de estilo: {exc}") from exc
+    job = book_pipeline.page_job(state, page, cfg, context=context)
+    full_prompt = job.prompt
+    negative_prompt = job.negative_prompt
+    references = job.references
+    style_reference = job.style_reference
 
     lock = _locks[(sid, index)]
     if lock.locked():
@@ -1381,14 +1397,15 @@ async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView
                     best = img
                     break
                 processed = await asyncio.to_thread(
-                    prepare_page, img, cfg.image_px, cfg.processing
+                    prepare_page, img, cfg.image_px, job.processing
                 )
                 score = score_line_art(processed)
                 if score > best_score:
                     best, best_score = img, score
                 if best_score >= 0.98:
                     break
-            assert best is not None
+            if best is None:
+                raise RuntimeError("o provedor nao retornou nenhuma imagem")
             await asyncio.to_thread(_write_page_assets, state, page, best)
             page.status = "done"
             page.updated_at = datetime.now()
@@ -1500,10 +1517,19 @@ def _interior_ops(state: SessionState, profile: PrintProfile | None) -> list[Pag
     )
 
 
+def _publishable_pages(profile: PrintProfile, interior_pages: int) -> int:
+    """Pages the printer will bind: at least the profile minimum, rounded up to even."""
+    pages = max(interior_pages, profile.min_pages)
+    return pages + (pages % 2)
+
+
 def _cover_geometry(state: SessionState, interior_pages: int) -> CoverGeometry:
     profile = get_profile(state.print_profile)
     cfg = _session_cfg(state)
-    return cover_geometry(cfg.trim_size_in, profile.spine_in(interior_pages, state.paper), profile.bleed_in)
+    pages = _publishable_pages(profile, interior_pages)
+    return cover_geometry(
+        cfg.trim_size_in, profile.spine_in(pages, state.paper), profile.bleed_in, rtl=_is_rtl(state)
+    )
 
 
 def _spine_text_allowed(state: SessionState, profile: PrintProfile, pages: int, geo: CoverGeometry) -> bool:
@@ -1620,16 +1646,26 @@ def kdp_preflight(sid: str) -> dict[str, object]:
 
 
 @app.post("/api/sessions/{sid}/kdp-interior")
-def export_kdp_interior(sid: str, pdfx_export: bool = Query(default=False, alias="pdfx")) -> FileResponse:
-    """Create a separate, no-bleed interior for review and download."""
+def export_kdp_interior(
+    sid: str,
+    pdfx_export: bool = Query(default=False, alias="pdfx"),
+    preview: bool = Query(default=False),
+) -> FileResponse:
+    """Create a separate, no-bleed interior for review and download.
+
+    ``preview`` composes it even when the book is not ready to print (missing pages,
+    below the profile's minimum), so the author can see the printed format early.
+    """
     if not SID_RE.fullmatch(sid):
         raise HTTPException(status_code=400, detail="invalid session id")
     with store.session_lock(sid):
         state = _session(sid)
         report = kdp_preflight(sid)
         interior_errors = report["interior_errors"]
-        if interior_errors:
+        if interior_errors and not preview:
             raise HTTPException(status_code=400, detail=interior_errors)
+        if not store.session_page_files(state):
+            raise HTTPException(status_code=400, detail="gere ao menos uma pagina para ver o miolo")
 
         with tempfile.NamedTemporaryFile(prefix="cbg-interior-", suffix=".pdf", delete=False) as handle:
             path = Path(handle.name)

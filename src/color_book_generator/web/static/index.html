@@ -32,6 +32,7 @@
 
         <div class="topbar-actions">
           <a class="btn btn-ghost btn-sm" id="export-book-zip" href="#">Exportar .zip</a>
+          <button class="btn btn-outline btn-sm" id="flip-book-btn" type="button" disabled title="Ver o livro do início ao fim: capa, abertura, páginas e encerramento">Folhear livro</button>
           <button class="btn btn-outline btn-sm" id="compose-btn" type="button" disabled>Gerar prévia PDF</button>
           <a class="btn btn-primary btn-sm is-hidden" id="pdf-link" href="#" target="_blank" rel="noopener">Abrir PDF</a>
         </div>
@@ -53,7 +54,7 @@
           <button class="step-tab" type="button" data-step="1">
             <span class="step-num">2</span>
             <span class="step-text">
-              <span class="step-title">Estilo e formato</span>
+              <span class="step-title">Ajustes finos</span>
               <span class="step-sub" id="step-1-sub">Estilo, formato e fonte</span>
             </span>
           </button>
@@ -109,20 +110,21 @@
                 <h1 id="stage-0-heading">Briefing da história</h1>
               </div>
               <p class="hint">
-                Defina para quem é o livro, o que ele deve dizer e o que evitar. A IA propõe premissas e monta a bíblia da história, que depois guia o roteiro, as páginas novas e a capa.
+                Todas as definições do livro ficam aqui: público, história, estilo, formato e impressão. Depois é só gerar: a IA escreve o roteiro, cria personagens, ilustra, faz a capa e monta o PDF. Os outros passos servem para revisar e ajustar.
               </p>
             </div>
             <span class="pill" id="brief-status-pill">Sem bíblia</span>
           </div>
 
-          <div class="brief-suggestions is-hidden" id="brief-preset-wrap">
-            <span class="hint hint-sm">Estilos que combinam com este público:</span>
-            <div class="brief-chip-row" id="brief-preset-suggestions"></div>
-          </div>
 
           <div class="brief-grid">
             <div class="floating-card">
               <h2>Para quem e por quê</h2>
+              <label class="field-label">
+                <span>Páginas ilustradas</span>
+                <input id="story-pages" class="field" type="number" min="1" max="200" value="12" />
+                <span class="hint hint-xs">Defina antes de sugerir premissas: a história, a bíblia e o roteiro são planejados para este número de páginas.</span>
+              </label>
               <div class="field-row field-row-2">
                 <label class="field-label">
                   <span>Faixa etária</span>
@@ -311,9 +313,84 @@
             </div>
           </div>
 
+          <div class="floating-card brief-style" id="brief-style">
+            <div class="section-header section-header-inline">
+              <div>
+                <h2>Estilo, formato e impressão</h2>
+                <p class="hint hint-sm">O estilo define o traço, a estrutura da história e os padrões de leitura e de traço. Prompt de estilo, provedor, tratamento do traço e legenda ficam em Ajustes finos (passo 2), se quiser mudar algo.</p>
+              </div>
+            </div>
+            <div class="brief-suggestions is-hidden" id="brief-preset-wrap">
+              <span class="hint hint-sm">Estilos que combinam com este público:</span>
+              <div class="brief-chip-row" id="brief-preset-suggestions"></div>
+            </div>
+            <div id="studio-style-picker"></div>
+            <div class="brief-style-fields">
+              <label class="field-label">
+                <span>Formato</span>
+                <select id="page-size" class="field">
+                  <optgroup label="Colorir e infantil">
+                    <option value="letter_8.5x11">Carta 8.5 x 11 in (KDP)</option>
+                    <option value="square_8.5x8.5">Quadrado 8.5 x 8.5 in (KDP)</option>
+                    <option value="square_8.25x8.25">Quadrado 8.25 x 8.25 in (KDP)</option>
+                    <option value="8x10">8 x 10 in (KDP)</option>
+                    <option value="a4">A4 21 x 29,7 cm (KDP)</option>
+                    <option value="br_21x28">21 x 28 cm (gráfica BR)</option>
+                    <option value="square_8x8">Quadrado 8 x 8 in</option>
+                  </optgroup>
+                  <optgroup label="Mangá, manhwa e HQ">
+                    <option value="6x9">6 x 9 in (KDP)</option>
+                    <option value="5x8">5 x 8 in (KDP)</option>
+                    <option value="manga_5x7.5">Mangá EUA 5 x 7.5 in</option>
+                    <option value="b6_jp">B6 japonês 12,8 x 18,2 cm</option>
+                    <option value="a5">A5 14,8 x 21 cm</option>
+                    <option value="formatinho_13.5x19">Formatinho 13,5 x 19 cm</option>
+                    <option value="americano_17x26">Americano 17 x 26 cm</option>
+                  </optgroup>
+                </select>
+              </label>
+              <div class="brief-profile">
+                <label class="field-label">
+                  <span>Onde o livro será impresso</span>
+                  <select id="print-profile" class="field"></select>
+                </label>
+                <p class="hint hint-sm" id="print-profile-hint"></p>
+              </div>
+              <label class="field-label">
+                <span>Autor</span>
+                <input id="book-author" class="field" type="text" placeholder="Nome do autor" />
+              </label>
+            </div>
+          </div>
+
+          <div class="floating-card brief-generate" id="brief-generate">
+            <div class="section-header section-header-inline">
+              <div>
+                <h2>Gerar o livro</h2>
+                <p class="hint hint-sm"><strong>Gerar livro completo</strong> usa tudo o que está acima (e a bíblia, se travada) para fazer roteiro, personagens, ilustrações, capa e PDF de uma vez. Prefere conferir as cenas antes? Use <strong>Só o roteiro</strong> e revise no passo 4.</p>
+                <p class="hint hint-sm" id="autopilot-config-summary"></p>
+              </div>
+            </div>
+            <div class="field-row field-row-2 brief-generate-fields">
+              <label class="field-label">
+                <span>Formato da história</span>
+                <select id="story-mode" class="field">
+                  <option value="narrative">Arco narrativo (começo, meio e fim)</option>
+                  <option value="collection">Coleção temática (páginas independentes)</option>
+                </select>
+              </label>
+            </div>
+            <p class="error-msg is-hidden" id="story-error" role="alert"></p>
+            <div class="card-actions brief-actions">
+              <button class="btn btn-outline btn-sm is-hidden" id="autopilot-resume-btn" type="button">Continuar de onde parou</button>
+              <button class="btn btn-outline btn-sm" id="story-generate-btn" type="button">Só o roteiro, para revisar</button>
+              <button class="btn btn-accent" id="autopilot-full-btn" type="button">Gerar livro completo</button>
+            </div>
+          </div>
+
           <div class="stage-footer">
             <span></span>
-            <button class="btn btn-primary btn-sm" type="button" data-goto-step="1">Ir para estilo e formato</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-goto-step="1">Ajustes finos (opcional)</button>
           </div>
         </section>
 
@@ -323,10 +400,10 @@
             <div class="stage-head-left">
               <div class="stage-title-row">
                 <span class="stage-big-num" aria-hidden="true">2.</span>
-                <h1 id="stage-1-heading">Estilo e formato</h1>
+                <h1 id="stage-1-heading">Ajustes finos de estilo</h1>
               </div>
               <p class="hint">
-                Escolha o estilo de traço, o formato de página, o provedor e a tipografia antes de gerar o livro.
+                Opcional. O estilo e o formato são escolhidos no briefing; aqui você ajusta o prompt de estilo, o provedor, o tratamento do traço e a legenda.
               </p>
             </div>
             <div class="card-actions">
@@ -334,7 +411,6 @@
             </div>
           </div>
 
-          <div id="studio-style-picker"></div>
 
           <div class="stage-split stage-split-stretch">
             <div class="floating-card">
@@ -350,29 +426,6 @@
               </label>
 
               <div class="field-row">
-                <label class="field-label">
-                  <span>Formato</span>
-                  <select id="page-size" class="field">
-                    <optgroup label="Colorir e infantil">
-                      <option value="letter_8.5x11">Carta 8.5 x 11 in (KDP)</option>
-                      <option value="square_8.5x8.5">Quadrado 8.5 x 8.5 in (KDP)</option>
-                      <option value="square_8.25x8.25">Quadrado 8.25 x 8.25 in (KDP)</option>
-                      <option value="8x10">8 x 10 in (KDP)</option>
-                      <option value="a4">A4 21 x 29,7 cm (KDP)</option>
-                      <option value="br_21x28">21 x 28 cm (gráfica BR)</option>
-                      <option value="square_8x8">Quadrado 8 x 8 in</option>
-                    </optgroup>
-                    <optgroup label="Mangá, manhwa e HQ">
-                      <option value="6x9">6 x 9 in (KDP)</option>
-                      <option value="5x8">5 x 8 in (KDP)</option>
-                      <option value="manga_5x7.5">Mangá EUA 5 x 7.5 in</option>
-                      <option value="b6_jp">B6 japonês 12,8 x 18,2 cm</option>
-                      <option value="a5">A5 14,8 x 21 cm</option>
-                      <option value="formatinho_13.5x19">Formatinho 13,5 x 19 cm</option>
-                      <option value="americano_17x26">Americano 17 x 26 cm</option>
-                    </optgroup>
-                  </select>
-                </label>
                 <label class="field-label">
                   <span>Provedor</span>
                   <select id="provider" class="field"></select>
@@ -413,6 +466,7 @@
               </div>
             </div>
 
+            <div class="stage-side-stack">
             <div class="floating-card">
               <h2>Referência de texto e fonte</h2>
               <p class="hint hint-sm">
@@ -480,34 +534,27 @@
               <button class="btn btn-outline btn-sm is-hidden" id="style-detect-btn" type="button">
                 Detectar fonte na imagem
               </button>
-              <details class="inline-disclosure">
-                <summary class="hint hint-xs">Testar traço em uma cena de amostra</summary>
-                <div class="stack-xs disclosure-body">
-                  <label class="field-label">
-                    <span>Cena de teste</span>
-                    <input id="style-sample-subject" class="field" type="text" placeholder="Ex.: casinha acolhedora com gato na janela" />
-                  </label>
-                  <button class="btn btn-accent btn-block btn-sm" id="style-generate-btn" type="button">Gerar amostra de traço</button>
-                </div>
-              </details>
               <button class="btn btn-danger-ghost btn-sm is-hidden" id="style-remove" type="button">Remover referência</button>
+            </div>
+
+            <div class="floating-card">
+              <h2>Âncora de estilo do livro</h2>
+              <p class="hint hint-sm">
+                Imagem que fixa o traço, o nível de detalhe e o respiro de todas as folhas de personagem, páginas e capa deste livro. É gerada uma vez, sem personagens, a partir do padrão de página da categoria e do estilo e do mundo deste livro. Todos os livros da mesma categoria partem do mesmo padrão.
+              </p>
+              <div class="anchor-preview" id="anchor-preview">
+                <span>Nenhuma âncora ainda. Ela será criada na primeira geração deste livro.</span>
+              </div>
+              <label class="field-label">
+                <span>Cenário da âncora (opcional)</span>
+                <input id="style-sample-subject" class="field" type="text" placeholder="Ex.: clareira com cogumelos e uma trilha iluminada" />
+              </label>
+              <div class="card-actions">
+                <button class="btn btn-accent btn-sm" id="style-generate-btn" type="button">Gerar âncora de estilo</button>
+                <button class="btn btn-danger-ghost btn-sm is-hidden" id="anchor-remove" type="button">Remover âncora</button>
+              </div>
               <p class="error-msg is-hidden" id="style-error" role="alert"></p>
             </div>
-          </div>
-
-          <div class="floating-card">
-            <div class="section-header section-header-inline">
-              <div>
-                <h2>Geração automática</h2>
-                <p class="hint hint-sm" id="autopilot-config-summary">
-                  Revise as configurações acima antes de iniciar a geração automática.
-                </p>
-              </div>
-              <div class="card-actions">
-                <button class="btn btn-outline btn-sm is-hidden" id="autopilot-resume-btn" type="button">Continuar de onde parou</button>
-                <button class="btn btn-outline btn-sm" id="autopilot-plan-btn" type="button">Planejar roteiro</button>
-                <button class="btn btn-accent btn-sm" id="autopilot-full-btn" type="button">Gerar livro completo</button>
-              </div>
             </div>
           </div>
 
@@ -580,44 +627,15 @@
                 <h1 id="stage-3-heading">História e páginas</h1>
               </div>
               <p class="hint" id="pages-subtitle">
-                Crie o roteiro, ajuste cada cena e gere as ilustrações na mesma tela. Use Nova página em qualquer cena para inserir uma página conectada ao contexto anterior e seguinte.
+                Revise cada cena e gere as ilustrações. O roteiro vem do briefing (passo 1); use Nova página em qualquer cena para inserir uma página conectada ao contexto anterior e seguinte.
               </p>
-            </div>
-            <div class="mode-pills" role="group" aria-label="Formato do roteiro">
-              <button class="mode-pill is-active" type="button" data-story-mode="narrative">Arco narrativo</button>
-              <button class="mode-pill" type="button" data-story-mode="collection">Coleção temática</button>
             </div>
           </div>
 
           <div class="story-pages-grid">
             <aside class="floating-card story-sidebar">
-              <h2>Roteiro do livro</h2>
-              <label class="field-label">
-                <span>Premissa ou tema</span>
-                <textarea id="story-premise" class="field" rows="5" placeholder="Vazio usa a ideia central do briefing. Ex.: Um dia chuvoso em que Barnaby prepara chá."></textarea>
-              </label>
-
-              <div class="field-row field-row-2">
-                <label class="field-label">
-                  <span>Páginas</span>
-                  <input id="story-pages" class="field" type="number" min="1" max="200" value="12" />
-                </label>
-                <label class="field-label">
-                  <span>Idioma</span>
-                  <select id="story-language" class="field">
-                    <option value="en" selected>English</option>
-                    <option value="pt-BR">Português (BR)</option>
-                    <option value="es">Español</option>
-                  </select>
-                </label>
-              </div>
-
-              <p class="error-msg is-hidden" id="story-error" role="alert"></p>
-
-              <div class="card-actions">
-                <button class="btn btn-accent btn-sm" id="story-generate-btn" type="button">Gerar roteiro</button>
-                <button class="btn btn-outline btn-sm" id="story-save-btn" type="button">Salvar roteiro</button>
-              </div>
+              <h2>Revisão do livro</h2>
+              <p class="hint hint-sm">Para refazer o roteiro, volte ao <button class="link-button" type="button" data-goto-step="0">briefing</button>.</p>
 
               <div class="reading-panel" id="reading-panel" aria-live="polite">
                 <h3 class="brief-subhead">Padrões de leitura</h3>
@@ -675,13 +693,6 @@
             </div>
           </div>
 
-          <div class="print-profile-row">
-            <label class="field-label">
-              <span>Onde o livro será impresso</span>
-              <select id="print-profile" class="field"></select>
-            </label>
-            <p class="hint hint-sm" id="print-profile-hint"></p>
-          </div>
 
           <div class="kdp-bar">
             <div class="kdp-toggles">
@@ -701,14 +712,6 @@
                 <input type="checkbox" id="kdp-color-test" />
                 <span>Teste de cores</span>
               </label>
-            </div>
-            <div class="card-actions">
-              <button class="btn btn-primary btn-sm" id="compose-final-btn" type="button" disabled>
-                Gerar prévia PDF
-              </button>
-              <a class="btn btn-outline btn-sm is-hidden" id="pdf-final-link" href="#" target="_blank" rel="noopener">
-                Abrir PDF
-              </a>
             </div>
           </div>
           <p class="error-msg is-hidden" id="pdf-final-error" role="alert"></p>
@@ -732,6 +735,8 @@
             <p class="hint hint-sm" id="cover-geometry"></p>
             <div class="card-actions">
               <button class="btn btn-outline btn-sm" id="kdp-preflight-btn" type="button">Verificar livro</button>
+              <button class="btn btn-primary btn-sm" id="interior-preview-btn" type="button">Ver miolo</button>
+              <button class="btn btn-outline btn-sm" id="cover-preview-btn" type="button">Ver capa completa</button>
               <button class="btn btn-outline btn-sm" id="kdp-interior-btn" type="button">Baixar miolo</button>
               <button class="btn btn-outline btn-sm" id="cover-pdf-btn" type="button">Baixar capa completa</button>
             </div>
@@ -741,12 +746,8 @@
           <div class="floating-card">
             <h2>Folha de rosto</h2>
             <p class="hint hint-sm">
-              O nome do autor e a sinopse aparecem na folha de rosto quando ela estiver marcada no PDF.
+              A sinopse (escrita pela IA ao finalizar o livro) e o autor definido no briefing aparecem na folha de rosto quando ela estiver marcada no PDF.
             </p>
-            <label class="field-label">
-              <span>Autor</span>
-              <input id="book-author" class="field" type="text" placeholder="Nome do autor" />
-            </label>
             <label class="field-label">
               <span>Sinopse</span>
               <textarea id="story-synopsis" class="field" rows="4" placeholder="Resumo breve do livro"></textarea>
@@ -880,6 +881,19 @@
           <input id="custom-preset-tagline" class="field" type="text" placeholder="Ex.: Traço firme com cenários de cafeteria" />
         </label>
         <button class="btn btn-primary btn-block" id="custom-preset-save" type="button">Salvar preset</button>
+      </div>
+    </div>
+
+    <div class="modal-backdrop is-hidden" id="print-preview-modal" role="dialog" aria-modal="true" aria-labelledby="print-preview-title">
+      <div class="modal-card print-preview-card">
+        <div class="modal-head">
+          <div>
+            <h2 id="print-preview-title">Prévia do miolo</h2>
+            <p class="hint hint-sm" id="print-preview-hint"></p>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="print-preview-close" type="button">Fechar</button>
+        </div>
+        <iframe class="print-preview-frame" id="print-preview-frame" title="Prévia do arquivo de impressão" src="about:blank"></iframe>
       </div>
     </div>
 

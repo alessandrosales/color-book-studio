@@ -448,7 +448,7 @@ def test_character_upload_requires_name_and_image() -> None:
     assert bad_image.status_code == 400
 
 
-def test_style_reference_is_isolated_per_book_and_falls_back_to_category() -> None:
+def test_style_reference_is_isolated_per_book_and_never_uses_other_books_art() -> None:
     # A legacy global style upload must NOT bleed into an unrelated book session
     upload = client.post(
         "/api/style",
@@ -461,26 +461,36 @@ def test_style_reference_is_isolated_per_book_and_falls_back_to_category() -> No
     session = client.post(
         "/api/sessions",
         json={
-            "pages": 1,
+            "pages": 2,
             "provider": "fake",
             "model": "fake-1",
             "preset_id": "manga_lineart",
         },
     ).json()
     assert session["style_url"] is None
+    assert session["style_anchor_url"] is None
     assert session["style_inherited_global"] is False
 
+    # The first generation draws the book's anchor from the manga standard; the page
+    # itself only sees that anchor, never the category sample page.
     gen = client.post(
         f"/api/sessions/{session['id']}/pages/1/generate",
         json={"provider": "fake"},
     )
     assert gen.json()["status"] == "done"
-    assert FakeProvider.last_style_reference is not None
-    assert FakeProvider.last_style_reference == store.load_page_layout_reference_bytes("manga", 1)
+    anchor = store.session_anchor_path(session["id"]).read_bytes()
+    assert FakeProvider.last_style_reference == anchor
+    assert anchor != store.category_reference_bytes("manga")
+    client.post(f"/api/sessions/{session['id']}/pages/2/generate", json={"provider": "fake"})
+    assert FakeProvider.last_style_reference == anchor
+    assert store.session_anchor_path(session["id"]).read_bytes() == anchor  # stays fixed
 
-    use = client.post(f"/api/sessions/{session['id']}/pages/1/use-as-style")
+    use = client.post(f"/api/sessions/{session['id']}/pages/2/use-as-style")
     assert use.status_code == 200
     assert use.json()["url"]
+    assert store.session_anchor_path(session["id"]).read_bytes() == store.page_file(
+        session["id"], 2
+    ).read_bytes()
 
     assert client.delete("/api/style").status_code == 204
     assert client.get("/api/style").json()["url"] is None
@@ -776,8 +786,17 @@ def test_sessions_list_orders_by_activity() -> None:
     assert [s["title"] for s in summaries[:2]] == ["Alpha", "Beta"]
     assert summaries[0]["done"] == 1
     assert summaries[0]["pages"] == 2
-    assert summaries[0]["cover_url"]
+    assert "/pages/1/view" in summaries[0]["cover_url"]
     assert second["id"] in [s["id"] for s in summaries]
+
+    # Once the book has a cover, the library card shows the cover instead.
+    assert client.post(
+        f"/api/sessions/{first['id']}/cover/generate", json={"provider": "fake"}
+    ).status_code == 200
+    summaries = client.get("/api/sessions").json()
+    card = next(s for s in summaries if s["id"] == first["id"])
+    assert "/cover/preview" in card["cover_url"]
+    assert client.get(card["cover_url"]).status_code == 200
 
 
 def test_import_latest_session_skips_newer_empty(monkeypatch, tmp_path) -> None:
@@ -934,3 +953,70 @@ def test_import_rejects_missing_extra_page_image(monkeypatch, tmp_path) -> None:
     assert res.status_code == 400
     assert "extra" in res.json()["detail"]
     assert not store.session_dir(sid).exists()
+
+
+def test_library_flags_generation_cut_by_a_restart() -> None:
+    session = client.post(
+        "/api/sessions", json={"pages": 2, "provider": "fake", "model": "fake-1"}
+    ).json()
+    card = next(s for s in client.get("/api/sessions").json() if s["id"] == session["id"])
+    assert card["autopilot"] is None
+
+    state = store.load_session(session["id"])
+    assert state is not None
+    state.pages[0].status = "generating"
+    store.recover_interrupted(state)  # what the server does when it starts again
+    store.save_session(state)
+
+    card = next(s for s in client.get("/api/sessions").json() if s["id"] == session["id"])
+    assert card["autopilot"]["status"] == "error"
+    assert card["autopilot"]["phase"] == "interrupted"
+
+
+def test_library_shows_manual_page_generation_in_progress() -> None:
+    session = client.post(
+        "/api/sessions", json={"pages": 4, "provider": "fake", "model": "fake-1"}
+    ).json()
+    state = store.load_session(session["id"])
+    assert state is not None
+    state.pages[0].status = "done"
+    state.pages[1].status = "generating"
+    store.save_session(state)
+
+    card = next(s for s in client.get("/api/sessions").json() if s["id"] == session["id"])
+    assert card["autopilot"]["status"] == "running"
+    assert card["autopilot"]["label"] == "Ilustrando página 2 de 4…"
+    assert card["autopilot"]["percent"] == 25
+
+
+def test_interior_preview_works_before_the_book_is_complete() -> None:
+    session = client.post("/api/sessions", json={"pages": 12, "provider": "fake"}).json()
+    sid = session["id"]
+    # Nothing generated yet: there is nothing to preview.
+    assert client.post(f"/api/sessions/{sid}/kdp-interior?preview=true").status_code == 400
+
+    state = store.load_session(sid)
+    assert state is not None
+    for page in state.pages[:3]:
+        page.status = "done"
+        Image.new("L", (100, 130), 255).save(store.page_file(sid, page.index))
+    store.save_session(state)
+
+    # Incomplete book: the print download is refused, the preview is composed.
+    assert client.post(f"/api/sessions/{sid}/kdp-interior").status_code == 400
+    preview = client.post(f"/api/sessions/{sid}/kdp-interior?preview=true")
+    assert preview.status_code == 200
+    pdf = PdfReader(io.BytesIO(preview.content))
+    assert float(pdf.pages[0].mediabox.width) == 8.5 * 72
+
+
+def test_cover_is_generated_in_the_books_own_trim_size() -> None:
+    session = client.post(
+        "/api/sessions", json={"pages": 1, "provider": "fake", "page_size": "6x9"}
+    ).json()
+    res = client.post(f"/api/sessions/{session['id']}/cover/generate", json={"provider": "fake"})
+    assert res.status_code == 200, res.text
+    with Image.open(store.cover_path(session["id"])) as cover:
+        # 6x9 at 300 dpi (it used to come out 8.5x11 and lose its sides in the wrap).
+        assert cover.size == (1800, 2700)
+

@@ -30,9 +30,13 @@ PAGE_LAYOUT_PROMPTS: dict[str, str] = {
         "with generous 12-15% pure white outer margins, thick uniform monoline outlines, large open colorable areas."
     ),
     "single_caption": (
-        "Page layout: children's storybook coloring page with one open, friendly illustration filling the upper "
-        "70-75% of the page, generous white breathing space, separated by a crisp horizontal divider from a clean "
-        "white narrative caption band at the bottom 20-25%."
+        "Page layout: classic children's storybook coloring page on a portrait page. ONE illustration "
+        "floats freely on the pure white page as a vignette: NO frame, NO border, NO panel, NO box, NO "
+        "divider line and NO caption band anywhere. The scene is centered horizontally, about 85% of "
+        "the page width, and sits in the upper-middle of the page (roughly from 12% to 70% of the "
+        "page height); its ground, grass and flowers simply end in white space instead of touching "
+        "the page edges. Keep about 8% white margin on the sides, and leave the bottom 25% of the page "
+        "pure white for one line of story text."
     ),
     "manga_action": (
         "Page layout: clean Japanese manga multi-panel page closely matching the style reference. "
@@ -139,7 +143,8 @@ def build_layout_text_directive(
             )
         if layout == "single_caption":
             return (
-                "Text: NO text anywhere on the page; fill the illustration cleanly without an empty caption box."
+                "Text: NO text anywhere on the page; keep the bottom of the page plain white, with no "
+                "empty box, frame or line."
             )
         return "Text: zero text, zero captions, zero speech balloons anywhere on the page."
 
@@ -195,11 +200,12 @@ def build_layout_text_directive(
 
     if layout == "single_caption":
         return (
-            f'Text placement (Storybook caption band): Inside the dedicated clean white {pos_word} band '
-            f'(separated from the illustration by a crisp horizontal frame line), render this exact narrative '
-            f'text centered in large, friendly, highly legible pure black {font_hint}: "{clean_text}". '
-            "Do NOT draw speech balloons inside the illustration and render ONLY this exact text verbatim "
-            "with accurate spelling."
+            f'Text placement (Storybook text line): In the plain white {pos_word} area of the page, '
+            "outside the illustration, print this exact story sentence centered on one or two lines, "
+            f'in a plain, clean, highly legible pure black {font_hint} (simple like Arial, regular weight, '
+            f'no outline, no decoration): "{clean_text}". The text sits directly on the white page: NO box, '
+            "NO frame, NO band and NO line around or above it. Do NOT draw speech balloons, and render "
+            "ONLY this exact text verbatim with accurate spelling."
         )
 
     if layout == "kawaii_stickers":

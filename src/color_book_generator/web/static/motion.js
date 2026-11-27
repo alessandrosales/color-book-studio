@@ -53,23 +53,6 @@ export function animateStageEnter(panel) {
   );
 }
 
-export function animateDrawerOpen(drawer) {
-  const gsap = getGsap();
-  if (!gsap || !drawer) return;
-  gsap.fromTo(
-    drawer,
-    { y: -8, autoAlpha: 0 },
-    {
-      y: 0,
-      autoAlpha: 1,
-      duration: 0.24,
-      ease: "power2.out",
-      overwrite: "auto",
-      clearProps: "transform,opacity,visibility",
-    }
-  );
-}
-
 export function animateModalOpen(backdrop) {
   const gsap = getGsap();
   if (!gsap || !backdrop) return;

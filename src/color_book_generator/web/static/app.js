@@ -147,8 +147,7 @@ function renderHeaderAndStepper() {
 
   const canCompose = doneCount > 0;
   $("#compose-btn").disabled = !canCompose;
-  const composeFinal = $("#compose-final-btn");
-  if (composeFinal) composeFinal.disabled = !canCompose;
+  $("#flip-book-btn").disabled = bookSpreadItems(s).length === 0;
 
   const pdfLink = $("#pdf-link");
   pdfLink.classList.toggle("is-hidden", !s.pdf_ready || !s.pdf_url);
@@ -223,10 +222,67 @@ function renderStage1Form() {
     removeBtn.classList.add("is-hidden");
   }
 
+  renderStyleAnchor(s);
   renderCaptionSettings(s);
   $("#style-detect-btn").classList.toggle("is-hidden", !s.style_url);
   renderStudioFontPresets();
   renderAutopilotSummary();
+}
+
+function renderStyleAnchor(s) {
+  const preview = $("#anchor-preview");
+  preview.innerHTML = "";
+  if (s.style_anchor_url) {
+    const img = document.createElement("img");
+    img.src = s.style_anchor_url;
+    img.alt = "Âncora de estilo do livro";
+    img.addEventListener("click", () => {
+      openLightbox([{ url: s.style_anchor_url, caption: "Âncora de estilo do livro" }], 0);
+    });
+    preview.appendChild(img);
+  } else {
+    const span = document.createElement("span");
+    span.textContent = "Nenhuma âncora ainda. Ela será criada na primeira geração deste livro.";
+    preview.appendChild(span);
+  }
+  $("#anchor-remove").classList.toggle("is-hidden", !s.style_anchor_url);
+  $("#style-generate-btn").textContent = s.style_anchor_url ? "Refazer âncora de estilo" : "Gerar âncora de estilo";
+}
+
+const DESIGN_LABELS = [
+  ["species_age", "Espécie/idade"],
+  ["body", "Corpo e proporções"],
+  ["face", "Cabeça e rosto"],
+  ["eyes", "Olhos"],
+  ["hair", "Cabelo/pelo"],
+  ["outfit", "Roupa"],
+  ["footwear", "Calçado"],
+  ["signature_prop", "Acessório"],
+  ["marks", "Marcas"],
+  ["silhouette", "Silhueta"],
+];
+
+function renderCharacterDesign(container, design) {
+  if (!design) return;
+  const details = document.createElement("details");
+  details.className = "char-design";
+  const summary = document.createElement("summary");
+  summary.textContent = "Design detalhado usado nas páginas";
+  details.appendChild(summary);
+  const dl = document.createElement("dl");
+  const add = (label, value) => {
+    if (!value) return;
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    dl.append(dt, dd);
+  };
+  for (const [key, label] of DESIGN_LABELS) add(label, (design[key] || "").trim());
+  add("Sempre", (design.always || []).join("; "));
+  add("Nunca", (design.never || []).join("; "));
+  details.appendChild(dl);
+  container.appendChild(details);
 }
 
 function renderStudioFontPresets() {
@@ -360,7 +416,9 @@ function renderStage2Characters() {
     const card = document.createElement("div");
     card.className = "char-card";
     const statusClass =
-      char.sheet_status === "ready"
+      char.sheet_outdated
+        ? "pill-warn"
+        : char.sheet_status === "ready"
         ? "pill-ok"
         : char.sheet_status === "error"
         ? "pill-err"
@@ -376,6 +434,8 @@ function renderStage2Characters() {
           <span class="pill ${statusClass}"></span>
         </div>
         <p class="char-card-desc"></p>
+        <div class="char-design-slot"></div>
+        ${char.sheet_outdated ? `<p class="hint hint-xs" style="margin: 0;">A descrição mudou depois desta folha. Refaça para as páginas seguirem o visual novo.</p>` : ""}
         ${char.error ? `<p class="error-msg" style="margin: 0;"></p>` : ""}
         <label class="check-toggle" style="font-size: 0.82rem;">
           <input type="checkbox" class="char-approve-toggle" ${char.approved ? "checked" : ""} />
@@ -383,7 +443,7 @@ function renderStage2Characters() {
         </label>
         <div class="char-card-actions">
           <button class="btn btn-accent btn-sm char-gen-btn" type="button">
-            ${char.image_url ? "Refazer folha" : "Gerar folha de referência"}
+            ${char.sheet_outdated ? "Atualizar folha" : char.image_url ? "Refazer folha" : "Gerar folha de referência"}
           </button>
           <button class="btn btn-danger-ghost btn-sm char-del-btn" type="button">Remover</button>
         </div>
@@ -406,7 +466,10 @@ function renderStage2Characters() {
       thumb.appendChild(emptyHint);
     }
     card.querySelector(".char-card-name").textContent = char.name;
-    card.querySelector(".char-card-head .pill").textContent = SHEET_STATUS_LABEL[char.sheet_status] || char.sheet_status;
+    card.querySelector(".char-card-head .pill").textContent = char.sheet_outdated
+      ? "folha desatualizada"
+      : SHEET_STATUS_LABEL[char.sheet_status] || char.sheet_status;
+    renderCharacterDesign(card.querySelector(".char-design-slot"), char.design);
     card.querySelector(".char-card-desc").textContent = char.description || "Sem descrição visual cadastrada.";
     if (char.error) card.querySelector(".error-msg").textContent = char.error;
 
@@ -475,12 +538,8 @@ function renderStage3StoryAndPages() {
   const s = state.session;
   if (!s) return;
 
-  $$("[data-story-mode]").forEach((btn) => {
-    btn.classList.toggle("is-active", btn.dataset.storyMode === s.story_mode);
-  });
-  $("#story-premise").value = s.story_premise || "";
   $("#story-pages").value = s.pages.length || 12;
-  if ($("#story-language")) $("#story-language").value = s.language || "en";
+  $("#story-mode").value = s.story_mode || "narrative";
 
   const list = $("#page-list");
   if (!list) return;
@@ -554,7 +613,7 @@ function renderStage3StoryAndPages() {
         ${
           page.status === "done"
             ? `<div class="card-actions">
-                 <button class="btn btn-outline btn-sm page-style-btn" type="button">Usar fonte desta página</button>
+                 <button class="btn btn-outline btn-sm page-style-btn" type="button" title="Fixa o traço desta página para as próximas páginas, folhas e capa">Usar como âncora de estilo</button>
                  <a class="btn btn-ghost btn-sm" href="${page.image_url}" download>PNG 300 DPI</a>
                </div>`
             : ""
@@ -635,8 +694,7 @@ function renderStage3StoryAndPages() {
         try {
           await api(`/api/sessions/${state.sid}/pages/${page.index}/use-as-style`, { method: "POST" });
           await reloadSession();
-          toast(`Página ${page.index} definida como referência de texto.`);
-          await detectReferenceTypography(true);
+          toast(`Página ${page.index} agora é a âncora de estilo do livro.`);
         } catch (err) {
           toast(err.message, true);
         }
@@ -949,10 +1007,6 @@ function renderStage5Finalize() {
 
   const pdfReady = Boolean(s.pdf_ready && s.pdf_url);
   $("#pdf-final-status").textContent = pdfReady ? "Prévia pronta" : "PDF ainda não gerado";
-  const pdfLink = $("#pdf-final-link");
-  pdfLink.classList.toggle("is-hidden", !pdfReady);
-  if (pdfReady) pdfLink.href = s.pdf_url;
-  $("#compose-final-btn").disabled = !s.pages.some((p) => p.status === "done");
 
   renderExtraPageList(s.front_extra_pages || [], $("#front-extra-list"), $("#front-extra-empty"));
   renderExtraPageList(s.back_extra_pages || [], $("#back-extra-list"), $("#back-extra-empty"));
@@ -1107,7 +1161,9 @@ function updateWordCount(li) {
   if (!counter || !input) return;
   const words = countWords(input.value);
   const cap = state.reading?.word_cap;
-  counter.textContent = words ? (cap ? `${words}/${cap} palavras` : `${words} palavras`) : "";
+  // Short "4/15" so the label stays on one line and the input lines up with the title field.
+  counter.textContent = words ? (cap ? `${words}/${cap}` : String(words)) : "";
+  counter.title = cap ? `${words} palavras de no máximo ${cap} para este público` : `${words} palavras`;
   counter.classList.toggle("is-over", Boolean(cap && words > cap));
 }
 
@@ -1265,7 +1321,6 @@ async function generateAllPending() {
 
 async function composePdfAction() {
   const topBtn = $("#compose-btn");
-  const finalBtn = $("#compose-final-btn");
   const errorEl = $("#pdf-final-error");
   if (errorEl) errorEl.classList.add("is-hidden");
   try {
@@ -1280,10 +1335,6 @@ async function composePdfAction() {
 
   topBtn.disabled = true;
   topBtn.textContent = "Gerando PDF…";
-  if (finalBtn) {
-    finalBtn.disabled = true;
-    finalBtn.textContent = "Gerando PDF…";
-  }
   try {
     state.session = await api(`/api/sessions/${state.sid}/compose`, { method: "POST" });
     renderHeaderAndStepper();
@@ -1297,13 +1348,41 @@ async function composePdfAction() {
     toast(err.message, true);
   } finally {
     topBtn.textContent = "Gerar prévia PDF";
-    if (finalBtn) finalBtn.textContent = "Gerar prévia PDF";
     renderHeaderAndStepper();
     renderStage5Finalize();
   }
 }
 
 /* ==================== LIGHTBOX ==================== */
+/* Every finished page of the book in reading order, as it will be printed. */
+function bookSpreadItems(s) {
+  if (!s) return [];
+  const items = [];
+  if (s.cover_include !== false && s.cover_preview_url) {
+    items.push({ url: s.cover_preview_url, caption: "Capa" });
+  }
+  for (const extra of s.front_extra_pages || []) {
+    if (extra.include_in_pdf && extra.preview_url) {
+      items.push({ url: extra.preview_url, caption: `Abertura${extra.title ? `: ${extra.title}` : ""}` });
+    }
+  }
+  const pages = [...(s.pages || [])].sort((a, b) => a.index - b.index);
+  for (const page of pages) {
+    const url = page.view_url || page.preview_url;
+    if (page.status !== "done" || !url) continue;
+    items.push({
+      url,
+      caption: `Página ${page.index} de ${pages.length}${page.title ? ` · ${page.title}` : ""}`,
+    });
+  }
+  for (const extra of s.back_extra_pages || []) {
+    if (extra.include_in_pdf && extra.preview_url) {
+      items.push({ url: extra.preview_url, caption: `Encerramento${extra.title ? `: ${extra.title}` : ""}` });
+    }
+  }
+  return items.map((item, i) => ({ ...item, caption: `${i + 1}/${items.length} · ${item.caption}` }));
+}
+
 function openLightbox(items, index) {
   if (!items.length) return;
   state.lightboxItems = items;
@@ -1337,7 +1416,7 @@ function sessionHasResumableProgress() {
     s.characters.length > 0 ||
     s.pages.some((p) => p.status === "done" || (p.title && p.title.trim()));
   if (!hasBlueprint) return false;
-  const pendingSheets = s.characters.some((c) => c.sheet_status !== "ready");
+  const pendingSheets = s.characters.some((c) => c.sheet_status !== "ready" || c.sheet_outdated);
   const pendingPages = s.pages.some((p) => p.status !== "done");
   return pendingSheets || pendingPages || !s.pdf_ready;
 }
@@ -1356,7 +1435,7 @@ function renderAutopilot(st) {
   }
 
   $("#autopilot-full-btn").disabled = running;
-  $("#autopilot-plan-btn").disabled = running;
+  $("#story-generate-btn").disabled = running;
 
   if (!isVisible) return;
 
@@ -1423,6 +1502,18 @@ async function pollAutopilot() {
   } catch (_) {}
 }
 
+function requestedPages() {
+  return Math.max(1, Math.min(200, Number($("#story-pages").value) || 12));
+}
+
+/** When the locked bible has a cast and the book has none, register it before scripting. */
+async function importBibleCastIfEmpty() {
+  if (state.session.characters?.length) return;
+  const brief = await api(`/api/sessions/${state.sid}/brief`).catch(() => null);
+  if (!brief?.bible?.locked || !brief.bible.characters?.length) return;
+  await api(`/api/sessions/${state.sid}/bible/characters`, { method: "POST" });
+}
+
 async function triggerAutopilot(stopAfter, { resume = false, redoFinishing = false } = {}) {
   try {
     const saved = await saveStyleConfig({ silent: true });
@@ -1430,9 +1521,11 @@ async function triggerAutopilot(stopAfter, { resume = false, redoFinishing = fal
     const st = await api(`/api/sessions/${state.sid}/autopilot`, {
       method: "POST",
       body: JSON.stringify({
-        pages: state.session.pages.length || 12,
-        premise_hint: $("#story-premise").value.trim(),
-        language: $("#story-language")?.value || state.session.language || "en",
+        pages: requestedPages(),
+        // The briefing (core idea + locked bible) is the story context on the server.
+        premise_hint: "",
+        language: state.session.language || "en",
+        mode: $("#story-mode").value,
         stop_after: stopAfter,
         resume,
         redo_finishing: redoFinishing,
@@ -1510,6 +1603,66 @@ async function refreshAuth() {
 
 /* ==================== BINDINGS & INIT ==================== */
 function bindEvents() {
+  const fetchPrintPdf = async (endpoint, pdfx, preview = false) => {
+    const query = `pdfx=${pdfx}${preview ? "&preview=true" : ""}`;
+    const response = await fetch(`/api/sessions/${state.sid}/${endpoint}?${query}`, { method: "POST" });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(Array.isArray(data.detail) ? data.detail.join(" ") : data.detail || "falha ao gerar o PDF");
+    }
+    return URL.createObjectURL(await response.blob());
+  };
+  // Opens the real print file (trim size, margins, gutter, page order) inside the app.
+  const previewPrintFile = async (button, endpoint, title, hint) => {
+    const result = $("#kdp-preflight-result");
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = "Montando prévia…";
+    try {
+      const url = await fetchPrintPdf(endpoint, false, true);
+      if (state.printPreviewUrl) URL.revokeObjectURL(state.printPreviewUrl);
+      state.printPreviewUrl = url;
+      $("#print-preview-title").textContent = title;
+      $("#print-preview-hint").textContent = hint;
+      $("#print-preview-frame").src = `${url}#view=Fit&pagemode=thumbs`;
+      $("#print-preview-modal").classList.remove("is-hidden");
+    } catch (err) {
+      result.textContent = err.message;
+      toast(`Não foi possível montar a prévia: ${err.message}`, true);
+    } finally {
+      button.disabled = false;
+      button.textContent = original;
+    }
+  };
+  const closePrintPreview = () => {
+    $("#print-preview-modal").classList.add("is-hidden");
+    $("#print-preview-frame").src = "about:blank";
+    if (state.printPreviewUrl) URL.revokeObjectURL(state.printPreviewUrl);
+    state.printPreviewUrl = null;
+  };
+  $("#print-preview-close").addEventListener("click", closePrintPreview);
+  $("#print-preview-modal").addEventListener("click", (ev) => {
+    if (ev.target === $("#print-preview-modal")) closePrintPreview();
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && !$("#print-preview-modal").classList.contains("is-hidden")) closePrintPreview();
+  });
+  $("#interior-preview-btn").addEventListener("click", () =>
+    previewPrintFile(
+      $("#interior-preview-btn"),
+      "kdp-interior",
+      "Prévia do miolo",
+      "Como vai para a gráfica: tamanho final, margens, margem da lombada e ordem das páginas. Páginas ainda não geradas ficam de fora.",
+    ),
+  );
+  $("#cover-preview-btn").addEventListener("click", () =>
+    previewPrintFile(
+      $("#cover-preview-btn"),
+      "cover-pdf",
+      "Prévia da capa completa",
+      "Contracapa, lombada e frente com sangria, na largura calculada para o número de páginas.",
+    ),
+  );
   const downloadPrintFile = async (button, endpoint, filename, doneMessage) => {
     const result = $("#kdp-preflight-result");
     const pdfx = $("#pdfx-export").checked;
@@ -1517,12 +1670,7 @@ function bindEvents() {
     button.disabled = true;
     button.textContent = pdfx ? "Convertendo para PDF/X…" : "Gerando…";
     try {
-      const response = await fetch(`/api/sessions/${state.sid}/${endpoint}?pdfx=${pdfx}`, { method: "POST" });
-      if (!response.ok) {
-        const data = await response.json();
-        throw new Error(Array.isArray(data.detail) ? data.detail.join(" ") : data.detail);
-      }
-      const url = URL.createObjectURL(await response.blob());
+      const url = await fetchPrintPdf(endpoint, pdfx);
       const link = document.createElement("a");
       link.href = url;
       link.download = pdfx ? filename.replace(".pdf", "-pdfx.pdf") : filename;
@@ -1606,9 +1754,20 @@ function bindEvents() {
     $(sel).addEventListener("change", renderAutopilotSummary);
   }
   $("#save-style-config").addEventListener("click", () => saveStyleConfig());
+  // The format is chosen in the briefing; save it as soon as it changes.
+  $("#page-size").addEventListener("change", async () => {
+    try {
+      await api(`/api/sessions/${state.sid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ page_size: $("#page-size").value }),
+      });
+      await reloadSession();
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
   $("#style-detect-btn").addEventListener("click", () => detectReferenceTypography());
   $("#autopilot-full-btn").addEventListener("click", () => triggerAutopilot("pdf"));
-  $("#autopilot-plan-btn").addEventListener("click", () => triggerAutopilot("blueprint"));
   $("#autopilot-resume")?.addEventListener("click", () => triggerAutopilot("pdf", { resume: true }));
   $("#autopilot-resume-btn")?.addEventListener("click", () => triggerAutopilot("pdf", { resume: true }));
   $("#autopilot-cancel").addEventListener("click", async () => {
@@ -1676,7 +1835,7 @@ function bindEvents() {
     const errEl = $("#style-error");
     errEl.classList.add("is-hidden");
     btn.disabled = true;
-    btn.textContent = "Gerando amostra visual…";
+    btn.textContent = "Gerando âncora…";
     try {
       await saveStyleConfig();
       await api(`/api/sessions/${state.sid}/style/generate`, {
@@ -1684,13 +1843,13 @@ function bindEvents() {
         body: JSON.stringify({ sample_subject: $("#style-sample-subject").value.trim() }),
       });
       await reloadSession();
-      toast("Amostra de traço gerada.");
+      toast("Âncora de estilo gerada.");
     } catch (err) {
       errEl.textContent = err.message;
       errEl.classList.remove("is-hidden");
     } finally {
       btn.disabled = false;
-      btn.textContent = "Gerar amostra de traço";
+      renderStyleAnchor(state.session);
     }
   });
 
@@ -1705,6 +1864,16 @@ function bindEvents() {
       await reloadSession();
       toast("Amostra de texto enviada!");
       await detectReferenceTypography(true);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
+  $("#anchor-remove").addEventListener("click", async () => {
+    try {
+      await api(`/api/sessions/${state.sid}/style/anchor`, { method: "DELETE" });
+      await reloadSession();
+      toast("Âncora removida. A próxima geração cria uma nova.");
     } catch (err) {
       toast(err.message, true);
     }
@@ -1757,44 +1926,16 @@ function bindEvents() {
     }
   });
 
-  // Stage 3: Story & Captions
-  $$("[data-story-mode]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const mode = btn.dataset.storyMode;
+  // Story generation lives in the briefing step.
+  $("#story-mode").addEventListener("change", async () => {
+    const mode = $("#story-mode").value;
+    try {
       await api(`/api/sessions/${state.sid}/story`, {
         method: "PATCH",
         body: JSON.stringify({ mode }),
       });
       state.session.story_mode = mode;
-      renderStage3StoryAndPages();
-    });
-  });
-
-  $("#story-language").addEventListener("change", async () => {
-    state.session = await api(`/api/sessions/${state.sid}`, {
-      method: "PATCH",
-      body: JSON.stringify({ language: $("#story-language").value }),
-    });
-  });
-
-  $("#story-save-btn").addEventListener("click", async () => {
-    const errEl = $("#story-error");
-    errEl.classList.add("is-hidden");
-    try {
-      state.session = await api(`/api/sessions/${state.sid}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          story_mode: state.session.story_mode || "narrative",
-          story_premise: $("#story-premise").value,
-          language: $("#story-language").value,
-          pages: Math.max(1, Math.min(200, Number($("#story-pages").value) || 12)),
-        }),
-      });
-      renderAll();
-      toast("Roteiro, idioma e páginas salvos.");
     } catch (err) {
-      errEl.textContent = err.message;
-      errEl.classList.remove("is-hidden");
       toast(err.message, true);
     }
   });
@@ -1802,22 +1943,22 @@ function bindEvents() {
   $("#story-generate-btn").addEventListener("click", async () => {
     const errEl = $("#story-error");
     errEl.classList.add("is-hidden");
-    // An empty premise falls back to the briefing's core idea on the server.
-    const premise = $("#story-premise").value.trim();
     const btn = $("#story-generate-btn");
     btn.disabled = true;
     btn.textContent = "Roteirizando páginas…";
     try {
+      await importBibleCastIfEmpty();
       const res = await api(`/api/sessions/${state.sid}/story/generate`, {
         method: "POST",
         body: JSON.stringify({
-          premise,
-          mode: state.session.story_mode || "narrative",
-          pages: Math.max(1, Math.min(200, Number($("#story-pages").value) || 12)),
-          language: $("#story-language").value,
+          premise: "",
+          mode: $("#story-mode").value,
+          pages: requestedPages(),
+          language: state.session.language || "en",
         }),
       });
       await reloadSession();
+      setStep(3);
       const notes = res.warnings?.length ? ` ${plural(res.warnings.length, "aviso", "avisos")} de leitura no painel.` : "";
       toast(`Roteiro criado com ${plural(res.pages_updated, "página pronta", "páginas prontas")}.${notes}`);
     } catch (err) {
@@ -1900,7 +2041,34 @@ function bindEvents() {
 
   $("#generate-pending").addEventListener("click", generateAllPending);
   $("#compose-btn").addEventListener("click", composePdfAction);
-  $("#compose-final-btn").addEventListener("click", composePdfAction);
+  // The page count is a book setting: save it as soon as it changes, so premises,
+  // bible, script and autopilot all plan for the same length.
+  $("#story-pages").addEventListener("change", async (ev) => {
+    const input = ev.currentTarget;
+    const target = Math.max(1, Math.min(200, Math.round(Number(input.value) || 0)));
+    if (!target || !state.session || target === state.session.pages.length) {
+      input.value = state.session?.pages.length || 12;
+      return;
+    }
+    input.value = target;
+    try {
+      state.session = await api(`/api/sessions/${state.sid}`, {
+        method: "PATCH",
+        body: JSON.stringify({ pages: target }),
+      });
+      renderAll();
+      toast(`Livro ajustado para ${target} páginas ilustradas.`);
+    } catch (err) {
+      input.value = state.session.pages.length;
+      toast(err.message, true);
+    }
+  });
+
+  $("#flip-book-btn").addEventListener("click", () => {
+    const items = bookSpreadItems(state.session);
+    if (!items.length) return toast("Ainda não há páginas prontas para folhear.", true);
+    openLightbox(items, 0);
+  });
 
   $("#cover-include").addEventListener("change", async () => {
     try {

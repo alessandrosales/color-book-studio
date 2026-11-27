@@ -120,6 +120,27 @@ output/web/{settings.json,characters/,style/}
 
 ## Como o pipeline funciona
 
+Cada livro tem uma **identidade própria** (`identity.py` + `web/book_pipeline.py`),
+e nada vem de outros livros:
+
+- **Padrão por categoria** (`static/page-layouts/<categoria>/`): cada categoria tem
+  sua própria pasta de páginas-modelo, sem subpastas e sem empréstimo entre
+  categorias. A primeira imagem da pasta é o padrão de formato da categoria.
+- **Âncora de estilo** (`<livro>/style/anchor.png`): criada antes da primeira geração
+  do livro (página, folha, capa ou piloto automático), sem personagens, a partir do
+  padrão da categoria + prompt de estilo + mundo do livro. Só a âncora vê a página-modelo;
+  folhas e páginas recebem apenas a âncora, então nada da página-modelo vaza.
+  A amostra de fonte (`style/reference.png`) serve só para detectar a fonte.
+- **Elenco fixo**: com a bíblia travada (ou personagens já criados), o roteiro usa
+  exatamente esse elenco, com os mesmos ids; os roteiros citam personagens só pelo
+  nome, sem redescrever a aparência, e não inventam personagens novos.
+- **Design + character sheet**: cada personagem ganha um design detalhado
+  (proporções, rosto, cabelo, roupa fixa, acessório, regras "sempre/nunca") e um
+  sheet com turnaround de 4 vistas, 4 expressões e o acessório. O sheet só é refeito
+  quando a descrição muda.
+- **Páginas**: toda página (manual ou piloto automático) usa a mesma receita:
+  âncora + sheets dos personagens da cena + design deles + regras do mundo.
+
 1. `prompts.py` e `story.py` montam os prompts de cada página.
 2. O provedor gera a imagem; com `candidates > 1` a página com melhor
    legibilidade (cobertura de tinta) é escolhida.

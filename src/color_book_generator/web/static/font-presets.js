@@ -90,10 +90,6 @@ export const FONT_PRESETS = [
   },
 ];
 
-export function getFontPreset(categoryId) {
-  return FONT_PRESETS.find((p) => p.id === categoryId) || null;
-}
-
 export async function fetchFontPresetFile(preset) {
   const res = await fetch(preset.imageUrl);
   if (!res.ok) throw new Error("Não foi possível carregar a amostra de fonte.");

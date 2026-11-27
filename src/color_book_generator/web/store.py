@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_valid
 from color_book_generator.brief import StoryBible, StoryBrief
 from color_book_generator.config import PageSizeName, ProcessingConfig
 from color_book_generator.fsutil import atomic_write_text
+from color_book_generator.identity import CharacterDesign
 from color_book_generator.presets import StylePreset
 from color_book_generator.story import StoryMode
 
@@ -81,6 +82,11 @@ class BookCharacter(BaseModel):
     approved: bool = False
     sheet_status: SheetStatus = "empty"
     error: str | None = None
+    # Detailed visual spec (see identity.CharacterDesign) and what it was built from.
+    design: CharacterDesign | None = None
+    design_source: str = ""
+    # design_source the current model sheet was drawn from ("" = legacy or uploaded).
+    sheet_source: str = ""
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime | None = None
 
@@ -279,26 +285,44 @@ def session_style_dir(sid: str) -> Path:
 
 
 def session_style_path(sid: str) -> Path:
+    """The book's typography sample (an image of text used to detect the caption font).
+
+    It is never sent to the image model: a text sample is not an art style.
+    """
     return session_style_dir(sid) / "reference.png"
 
 
+def session_anchor_path(sid: str) -> Path:
+    """The book's own art style anchor, generated from its style prompt and world."""
+    return session_style_dir(sid) / "anchor.png"
+
+
 def load_session_style_bytes(sid: str) -> bytes | None:
-    """Return only this book's own style anchor image (never inherits a global style)."""
-    path = session_style_path(sid)
+    """Return only this book's own style anchor image (never another book's art)."""
+    path = session_anchor_path(sid)
     return path.read_bytes() if path.exists() else None
+
+
+def save_session_anchor(sid: str, data: bytes) -> None:
+    session_style_dir(sid).mkdir(parents=True, exist_ok=True)
+    session_anchor_path(sid).write_bytes(data)
 
 
 def effective_style_reference_bytes(
     sid: str,
-    category: str,
+    category: str = "",
     page_index: int = 1,
     *,
     preset_id: str | None = None,
 ) -> bytes | None:
-    """Return this book's style anchor, falling back to the built-in category/preset reference."""
-    return load_session_style_bytes(sid) or load_page_layout_reference_bytes(
-        category, page_index, preset_id=preset_id
-    )
+    """Style image sent with every generation of this book: its own anchor, or nothing.
+
+    The built-in layout library holds finished pages of other books (a unicorn, a fox,
+    manga heroes...). Sending them as references made their characters and scenes leak
+    into unrelated books, so they are never used for generation.
+    """
+    del category, page_index, preset_id  # kept for call-site compatibility
+    return load_session_style_bytes(sid)
 
 
 def clear_session_style(sid: str) -> None:
@@ -317,40 +341,28 @@ def _list_ref_images(directory: Path) -> list[Path]:
     )
 
 
-def page_layout_reference_paths(
-    category: str, preset_id: str | None = None
-) -> list[Path]:
-    """Return built-in illustrated reference images for ``category`` (or ``category/preset_id``)."""
-    base = Path(__file__).resolve().parent / "static" / "page-layouts"
-    if not base.exists():
-        return []
+def category_reference_dir(category: str) -> Path | None:
+    """The category's own folder of sample pages (one folder per category, nothing shared)."""
     cat = category.strip().lower()
     if not _SAFE_SLUG_RE.match(cat):
-        cat = "cozy"
-    if preset_id:
-        pid = preset_id.strip().lower()
-        if _SAFE_SLUG_RE.match(pid):
-            preset_imgs = _list_ref_images(base / cat / pid)
-            if preset_imgs:
-                return preset_imgs
-    cat_imgs = _list_ref_images(base / cat)
-    if cat_imgs:
-        return cat_imgs
-    return _list_ref_images(base / "cozy")
-
-
-def load_page_layout_reference_bytes(
-    category: str,
-    page_index: int = 1,
-    *,
-    preset_id: str | None = None,
-) -> bytes | None:
-    """Pick a built-in page-layout reference image for ``category``/``preset_id``, rotating per page."""
-    paths = page_layout_reference_paths(category, preset_id=preset_id)
-    if not paths:
         return None
-    chosen = paths[(max(1, page_index) - 1) % len(paths)]
-    return chosen.read_bytes()
+    return Path(__file__).resolve().parent / "static" / "page-layouts" / cat
+
+
+def category_reference_paths(category: str) -> list[Path]:
+    """Sample pages that define this category's page format, in a stable order.
+
+    Isolated per category: no per-preset subfolders and no fallback to another
+    category, so every book of a category starts from exactly the same pattern.
+    """
+    directory = category_reference_dir(category)
+    return _list_ref_images(directory) if directory is not None else []
+
+
+def category_reference_bytes(category: str) -> bytes | None:
+    """The category's standard sample page (always the first one), or None."""
+    paths = category_reference_paths(category)
+    return paths[0].read_bytes() if paths else None
 
 
 def session_characters_dir(sid: str) -> Path:

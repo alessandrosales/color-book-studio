@@ -30,6 +30,8 @@ Ending = Literal["", "happy", "open", "twist", "circular"]
 StoryStructure = Literal["picture_book", "kishotenketsu", "webtoon_beats", "collection"]
 
 TEXT_LIMIT = 600
+# Largest cast a story bible may define (every recurring character needs a model sheet).
+MAX_BIBLE_CAST = 4
 SHORT_LIMIT = 200
 
 
@@ -459,6 +461,9 @@ def build_story_bible(
     cat = preset.category if preset else category
     structure = structure_for_category(cat)
     size = cast_size if cast_size is not None else (preset.cast if preset else 2)
+    if size:
+        # Supporting characters who recur must be designed too, or they change on every page.
+        size = max(size, MAX_BIBLE_CAST)
     premise_block = (
         "Chosen premise:\n"
         f"- title: {premise.title}\n- logline: {premise.logline}\n"
@@ -469,7 +474,12 @@ def build_story_bible(
     cast_rule = (
         "Return an empty characters list (no recurring characters)."
         if size == 0
-        else f"Define 1 to {max(1, size)} recurring characters; the protagonist from the brief comes first."
+        else (
+            f"Define 1 to {max(1, size)} recurring characters; the protagonist from the brief "
+            "comes first. Include EVERY character that appears on more than one page "
+            "(sidekicks, friends, family): characters left out of this list must not appear "
+            "by name anywhere in the book. Prefer a small cast."
+        )
     )
     user_prompt = (
         f"Language for every field: {language}\n"
@@ -479,8 +489,10 @@ def build_story_bible(
         f"Author brief:\n{render_brief(brief, cat) or '- (empty)'}\n\n"
         f"{premise_block}\n"
         "Task: write the story bible that every page of this book will follow.\n"
-        f"- {cast_rule} 'look' must be a concrete visual description usable for line art "
-        "(species/age, hair, outfit, one signature prop), never colours only.\n"
+        f"- {cast_rule} 'look' must be a concrete visual description usable for line art in "
+        "2-3 sentences (species/age, proportions, face, hair or fur, ONE fixed outfit with its "
+        "shapes/patterns, one signature prop, distinctive marks), never colours only. Make "
+        "the characters easy to tell apart by silhouette.\n"
         "- world_rules: 2 to 5 short rules that keep scenes consistent.\n"
         f"- beats: 4 to 9 beats in order that follow the required structure, each with the page "
         f"range it covers (e.g. '1-3'), together covering pages 1 to {pages}.\n"

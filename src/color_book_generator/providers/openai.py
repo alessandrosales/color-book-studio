@@ -12,8 +12,10 @@ from color_book_generator.providers.base import (
     CharacterReference,
     ImageProvider,
     ProviderError,
+    character_reference_note,
     pick_size,
     register,
+    style_reference_note,
 )
 
 _SIZES: dict[str, tuple[int, int]] = {
@@ -61,21 +63,13 @@ class OpenAIProvider(ImageProvider):
                 )
             files: list[tuple[str, bytes, str]] = []
             if style_reference is not None:
-                full_prompt = (
-                    f"{full_prompt}\n\nThe first reference image is a STRICT STYLE & LAYOUT reference: "
-                    "closely match its exact drawing style, line weight, clean uncluttered background "
-                    "simplicity, generous white breathing space, panel rhythm, and speech-balloon shape. "
-                    "Do not copy its subject, characters or text."
-                )
+                full_prompt = f"{full_prompt}\n\n{style_reference_note()}"
                 files.append(("style.png", style_reference, "image/png"))
             if references:
-                names = ", ".join(name for name, _data in references)
-                full_prompt = (
-                    f"{full_prompt}\n\nUse the reference images to keep these characters "
-                    f"recognizable (same face, hairstyle, proportions and outfit design): "
-                    f"{names}. Redraw them in the requested line-art style and ignore the "
-                    "photo colors and lighting."
+                note = character_reference_note(
+                    [name for name, _data in references], after_style=style_reference is not None
                 )
+                full_prompt = f"{full_prompt}\n\n{note}"
                 files.extend(
                     (f"{name}.png", data, "image/png") for name, data in references
                 )

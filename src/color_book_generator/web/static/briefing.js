@@ -305,13 +305,19 @@ async function suggestField(button) {
   });
 }
 
+/* Illustrated pages the author asked for (the story is planned for this length). */
+function pageCount() {
+  const value = Number($("#story-pages")?.value);
+  return Number.isFinite(value) && value >= 1 ? Math.min(200, Math.round(value)) : undefined;
+}
+
 async function proposePremises() {
   if (!requireLogline()) return;
   const button = $("#brief-premises-btn");
   await withBusy(button, "Pensando em premissas…", async () => {
     const res = await deps.api(`/api/sessions/${sid()}/brief/premises`, {
       method: "POST",
-      body: JSON.stringify({ brief: collectBrief() }),
+      body: JSON.stringify({ brief: collectBrief(), pages: pageCount() }),
     });
     renderPremises(res.premises || []);
   });
@@ -327,7 +333,7 @@ async function generateBible(premise, button) {
   await withBusy(button, "Montando a bíblia…", async () => {
     view = await deps.api(`/api/sessions/${sid()}/bible/generate`, {
       method: "POST",
-      body: JSON.stringify({ premise, brief: collectBrief() }),
+      body: JSON.stringify({ premise, brief: collectBrief(), pages: pageCount() }),
     });
     renderMeta();
     renderBible();

@@ -1,7 +1,6 @@
 import { syncAllPopoverSelects } from "/static/popover-select.js";
-import { formatPageSize, renderStylePicker } from "/static/style-picker.js";
-import { animateCardsIn, animateDrawerOpen, animateModalOpen } from "/static/motion.js";
-import { fetchFontPresetFile, getFontPreset, renderFontPresetPicker } from "/static/font-presets.js";
+import { formatPageSize } from "/static/style-picker.js";
+import { animateCardsIn, animateModalOpen } from "/static/motion.js";
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -22,8 +21,6 @@ const CATEGORY_LABEL = {
 
 const state = {
   presets: [],
-  categories: [],
-  selectedPresetId: "kids_storybook",
   books: [],
   selectedBookIds: new Set(),
   filterCategory: "all",
@@ -33,10 +30,6 @@ const state = {
   codexModels: [],
   codexCheapest: null,
   codexTimer: null,
-  styleFile: null,
-  stylePreviewUrl: null,
-  styleIsCustomUpload: false,
-  selectedFontPresetId: "cozy",
 };
 
 async function api(path, options = {}) {
@@ -79,180 +72,14 @@ function costRank(slug) {
   return 4;
 }
 
-function renderBookProviders() {
-  const provSelect = $("#book-provider");
-  if (!provSelect) return;
-  const providers = state.defaults?.providers || ["codex", "openai", "gemini", "replicate", "local"];
-  const prev = provSelect.value;
-  provSelect.innerHTML = "";
-  for (const p of providers) {
-    const opt = document.createElement("option");
-    opt.value = p;
-    opt.textContent = p;
-    provSelect.appendChild(opt);
+/** Provider and model for a new book: the ChatGPT plan when it is the only one connected. */
+function defaultEngine() {
+  const useCodex = state.codex?.authenticated && !state.defaults?.openai_configured;
+  if (useCodex) {
+    const models = [...state.codexModels].sort((a, b) => costRank(a) - costRank(b));
+    return { provider: "codex", model: state.codexCheapest || models[0] || state.defaults?.codex_model };
   }
-  const useCodex = state.codex && state.codex.authenticated && !state.defaults?.openai_configured;
-  const preferred = prev || (useCodex ? "codex" : state.defaults?.provider || "openai");
-  provSelect.value = providers.includes(preferred) ? preferred : providers[0];
-  renderBookModels({ forceCheapest: !prev });
-}
-
-function renderBookModels({ forceCheapest = false } = {}) {
-  const select = $("#book-model");
-  const provider = $("#book-provider")?.value;
-  if (!select || !provider) return;
-  let models = [];
-  let cheapest = null;
-
-  if (provider === "codex") {
-    const raw = state.codexModels.length
-      ? [...state.codexModels]
-      : [state.defaults?.codex_model || "gpt-5.4-mini", "gpt-5.5", "gpt-6.2-sol"];
-    models = [...raw].sort((a, b) => costRank(a) - costRank(b));
-    cheapest = state.codexCheapest || models[0];
-    if (cheapest && models.includes(cheapest)) {
-      models = [cheapest, ...models.filter((m) => m !== cheapest)];
-    }
-  } else if (provider === "openai") {
-    models = ["gpt-image-1", "dall-e-3"];
-    cheapest = "gpt-image-1";
-  } else if (provider === "gemini") {
-    models = ["imagen-3.0-fast-generate-001", "imagen-3.0-generate-002"];
-    cheapest = "imagen-3.0-fast-generate-001";
-  } else if (provider === "replicate") {
-    models = ["black-forest-labs/flux-schnell", "black-forest-labs/flux-dev"];
-    cheapest = "black-forest-labs/flux-schnell";
-  } else if (provider === "local") {
-    models = ["stabilityai/stable-diffusion-xl-base-1.0"];
-    cheapest = models[0];
-  }
-
-  const current = forceCheapest ? cheapest : select.value || cheapest;
-  if (current && !models.includes(current)) models.push(current);
-
-  select.innerHTML = "";
-  for (const m of models) {
-    const opt = document.createElement("option");
-    opt.value = m;
-    opt.textContent = m === cheapest ? `${m} (mais barato)` : m;
-    select.appendChild(opt);
-  }
-  if (current) select.value = current;
-  syncAllPopoverSelects();
-}
-
-function renderBookCaptionUI() {
-  const enabled = Boolean($("#book-caption-enabled")?.checked);
-  const opts = $("#book-caption-options");
-  if (opts) opts.style.opacity = enabled ? "1" : "0.5";
-  const fontLabels = { sans: "Sans", serif: "Serif", mono: "Mono" };
-  const font = fontLabels[$("#book-caption-font")?.value] || "Sans";
-  const weight = $("#book-caption-weight")?.value === "bold" ? "Negrito" : "Normal";
-  const statusEl = $("#book-style-typography-status");
-  if (statusEl) statusEl.textContent = `Fonte ativa: ${font}, ${weight}`;
-}
-
-function renderBookStylePreview() {
-  const preview = $("#book-style-preview");
-  const clearBtn = $("#book-style-clear");
-  if (!preview) return;
-  preview.innerHTML = "";
-  if (state.stylePreviewUrl) {
-    const img = document.createElement("img");
-    img.src = state.stylePreviewUrl;
-    img.alt = "Amostra de texto selecionada";
-    preview.appendChild(img);
-    clearBtn?.classList.remove("is-hidden");
-  } else {
-    const span = document.createElement("span");
-    span.textContent = "Nenhuma amostra de texto selecionada.";
-    preview.appendChild(span);
-    clearBtn?.classList.add("is-hidden");
-  }
-}
-
-function renderHomeFontPresets() {
-  renderFontPresetPicker({
-    root: $("#home-font-presets"),
-    selectedId: state.selectedFontPresetId,
-    onSelect: (fontPreset) => selectHomeFontPreset(fontPreset, { applyCaption: true }),
-  });
-}
-
-async function selectHomeFontPreset(fontPreset, { applyCaption = true } = {}) {
-  if (!fontPreset) return;
-  if (state.stylePreviewUrl && state.stylePreviewUrl.startsWith("blob:")) {
-    URL.revokeObjectURL(state.stylePreviewUrl);
-  }
-  state.selectedFontPresetId = fontPreset.id;
-  state.styleIsCustomUpload = false;
-  state.stylePreviewUrl = fontPreset.imageUrl;
-  $("#book-style-file").value = "";
-  if (applyCaption && fontPreset.caption) {
-    const cap = fontPreset.caption;
-    $("#book-caption-enabled").checked = Boolean(cap.enabled);
-    $("#book-caption-style").value = cap.style || "caption";
-    $("#book-caption-position").value = cap.position || "bottom";
-    $("#book-caption-font").value = cap.font_family || "sans";
-    $("#book-caption-weight").value = cap.bold ? "bold" : "normal";
-    $("#book-caption-size").value = String(cap.font_size_ratio || 0.032);
-    renderBookCaptionUI();
-    syncAllPopoverSelects();
-  }
-  renderBookStylePreview();
-  renderHomeFontPresets();
-  try {
-    state.styleFile = await fetchFontPresetFile(fontPreset);
-  } catch (_) {}
-}
-
-function applyPresetToNewBookForm(preset) {
-  if (!preset) return;
-  $("#book-context").value = preset.context_prompt || "";
-  $("#book-negative-prompt").value = preset.negative_prompt || "";
-  $("#book-page-size").value = preset.page_size || "letter_8.5x11";
-
-  const proc = preset.processing || {};
-  $("#book-proc-threshold").value = proc.threshold || "adaptive";
-  $("#book-proc-min-px").value = proc.min_component_px ?? 24;
-  $("#book-proc-denoise").checked = proc.denoise ?? true;
-  $("#book-proc-crop").checked = proc.crop_to_content ?? true;
-
-  $("#book-kdp-blank-verso").checked = Boolean(preset.blank_verso);
-  $("#book-kdp-title-page").checked = preset.include_title_page ?? true;
-  $("#book-kdp-belongs-to").checked = Boolean(preset.include_belongs_to_page);
-  $("#book-kdp-color-test").checked = Boolean(preset.include_color_test_page);
-
-  const cap = preset.caption || {};
-  $("#book-caption-enabled").checked = Boolean(cap.enabled);
-  $("#book-caption-style").value = cap.style || "balloon";
-  $("#book-caption-position").value = cap.position || "bottom";
-  $("#book-caption-font").value = cap.font_family || "sans";
-  $("#book-caption-weight").value = cap.bold ? "bold" : "normal";
-  $("#book-caption-size").value = String(cap.font_size_ratio || 0.032);
-  renderBookCaptionUI();
-  syncAllPopoverSelects();
-
-  if (!state.styleIsCustomUpload) {
-    const matchedFont = getFontPreset(preset.category);
-    if (matchedFont) {
-      selectHomeFontPreset(matchedFont, { applyCaption: false });
-    }
-  }
-}
-
-function renderPresets() {
-  renderStylePicker({
-    root: $("#home-style-picker"),
-    presets: state.presets,
-    categories: state.categories,
-    selectedId: state.selectedPresetId,
-    onSelect: (preset) => {
-      state.selectedPresetId = preset.id;
-      renderPresets();
-      applyPresetToNewBookForm(preset);
-    },
-  });
+  return { provider: state.defaults?.provider, model: state.defaults?.model };
 }
 
 function filteredBooks() {
@@ -280,7 +107,7 @@ function renderBooks({ animate = false } = {}) {
   if (!visible.length) {
     $("#empty-state-msg").textContent = totalCount
       ? "Nenhum livro corresponde a este filtro."
-      : "Sua biblioteca está vazia. Crie o primeiro livro para escolher o estilo, montar os personagens e gerar as páginas.";
+      : "Sua biblioteca está vazia. Crie o primeiro livro: você começa contando a história no briefing e depois escolhe o estilo, os personagens e as páginas.";
     return;
   }
 
@@ -440,7 +267,7 @@ async function pollGeneration() {
   }
   for (const book of finished) {
     if (book.autopilot) toast(`"${book.title}": a geração parou. Abra o livro para continuar.`, true);
-    else toast(`"${book.title}" está pronto!`);
+    else if (book.pages && book.done >= book.pages) toast(`"${book.title}" está pronto!`);
   }
   scheduleGenerationPolling();
 }
@@ -512,103 +339,33 @@ async function exportSelectedBooks() {
   }
 }
 
-function toggleCreator(open) {
-  const form = $("#new-book-form");
-  const toolbar = $(".workspace-toolbar");
-  const library = $("#library-section");
-  const toggleBtn = $("#new-book-toggle");
-  const shouldOpen = open === undefined ? form.classList.contains("is-hidden") : open;
-  form.classList.toggle("is-hidden", !shouldOpen);
-  toolbar?.classList.toggle("is-hidden", shouldOpen);
-  library?.classList.toggle("is-hidden", shouldOpen);
-  if (toggleBtn) {
-    toggleBtn.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
-    toggleBtn.textContent = shouldOpen ? "Voltar para livros" : "Novo livro";
+/** "Novo livro": create the book with the default style and open it on the briefing step. */
+async function createBookFromBriefing() {
+  const btn = $("#new-book-briefing");
+  const prevLabel = btn?.textContent;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Criando…";
   }
-  if (shouldOpen) {
-    animateDrawerOpen(form);
-  }
-}
-
-async function createBook(ev, { autopilot = false } = {}) {
-  if (ev) ev.preventDefault();
-  const errEl = $("#new-book-error");
-  errEl.classList.add("is-hidden");
-  const preset = state.presets.find((p) => p.id === state.selectedPresetId);
-  // The final title is written by the autopilot once the story is finished.
-  const title = preset ? `Novo livro ${preset.name}` : "Novo Livro de Colorir";
-  const pages = Math.max(1, Math.min(200, Number($("#book-pages").value) || 12));
-  const premise = $("#book-premise").value.trim();
-  const language = $("#book-language")?.value || "en";
-
-  const provider = $("#book-provider")?.value || state.defaults?.provider || "openai";
-  const model = $("#book-model")?.value || state.defaults?.model || "gpt-image-1";
-
-  const btn = autopilot ? $("#book-autopilot") : $("#book-create");
-  const prevLabel = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = autopilot ? "Iniciando geração completa…" : "Criando…";
   try {
+    const preset = state.presets.find((p) => p.badge === "Padrão") || state.presets[0];
+    const engine = defaultEngine();
     const created = await api("/api/sessions", {
       method: "POST",
       body: JSON.stringify({
-        title,
-        pages,
-        language,
-        preset_id: state.selectedPresetId,
-        story_premise: premise,
-        context_prompt: $("#book-context").value.trim(),
-        negative_prompt: $("#book-negative-prompt").value.trim(),
-        page_size: $("#book-page-size").value,
-        provider,
-        model,
-        processing: {
-          threshold: $("#book-proc-threshold").value,
-          min_component_px: Math.max(0, Number($("#book-proc-min-px").value) || 0),
-          denoise: $("#book-proc-denoise").checked,
-          crop_to_content: $("#book-proc-crop").checked,
-        },
-        blank_verso: $("#book-kdp-blank-verso").checked,
-        include_title_page: $("#book-kdp-title-page").checked,
-        include_belongs_to_page: $("#book-kdp-belongs-to").checked,
-        include_color_test_page: $("#book-kdp-color-test").checked,
-        caption_enabled: $("#book-caption-enabled").checked,
-        caption_style: $("#book-caption-style").value,
-        caption_position: $("#book-caption-position").value,
-        caption_font_family: $("#book-caption-font").value,
-        caption_font_bold: $("#book-caption-weight").value === "bold",
-        caption_font_size: Number($("#book-caption-size").value) || 0.032,
+        title: "Novo livro",
+        preset_id: preset?.id,
+        provider: engine.provider || undefined,
+        model: engine.model || undefined,
       }),
     });
-    if (state.styleFile) {
-      const form = new FormData();
-      form.append("image", state.styleFile);
-      await api(`/api/sessions/${created.id}/style`, { method: "POST", body: form });
-    }
-    if (autopilot) {
-      await api(`/api/sessions/${created.id}/autopilot`, {
-        method: "POST",
-        body: JSON.stringify({
-          pages,
-          premise_hint: premise,
-          language,
-          stop_after: "pdf",
-        }),
-      });
-      // Generation runs in the background: follow it from the library card.
-      toggleCreator(false);
-      await loadBooks();
-      focusGeneratingBook(created.id);
-      toast("Geração iniciada. Acompanhe o progresso no card do livro.");
-      return;
-    }
     window.location.href = `/books/${created.id}`;
   } catch (err) {
-    errEl.textContent = err.message;
-    errEl.classList.remove("is-hidden");
-  } finally {
-    btn.disabled = false;
-    btn.textContent = prevLabel;
+    toast(err.message, true);
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = prevLabel;
+    }
   }
 }
 
@@ -659,7 +416,6 @@ async function refreshAuth() {
         state.codexCheapest = m.cheapest || null;
       }
     }
-    renderBookProviders();
   } catch (_) {}
 }
 
@@ -708,18 +464,8 @@ async function loadBooks({ animate = false } = {}) {
 }
 
 async function loadPresets() {
-  const [presets, categories] = await Promise.all([
-    api("/api/presets"),
-    api("/api/presets/categories").catch(() => []),
-  ]);
-  state.presets = presets;
-  state.categories = categories;
-  renderPresets();
-  const initialPreset = presets.find((p) => p.id === state.selectedPresetId) || presets[0];
-  if (initialPreset) {
-    state.selectedPresetId = initialPreset.id;
-    applyPresetToNewBookForm(initialPreset);
-  }
+  // Only needed to pick the default style of a new book; the style is chosen inside the book.
+  state.presets = await api("/api/presets");
 }
 
 async function init() {
@@ -743,44 +489,9 @@ async function init() {
     focusGeneratingBook(startedId);
     toast("Geração iniciada. Acompanhe o progresso no card do livro.");
   }
-  renderBookProviders();
-  renderBookCaptionUI();
 
-  $("#new-book-toggle").addEventListener("click", () => toggleCreator());
-  $("#empty-create-btn").addEventListener("click", () => toggleCreator(true));
-  $("#book-cancel").addEventListener("click", () => toggleCreator(false));
-  $("#book-cancel-2").addEventListener("click", () => toggleCreator(false));
-  $("#new-book-form").addEventListener("submit", (ev) => createBook(ev, { autopilot: false }));
-  $("#book-autopilot").addEventListener("click", () => createBook(null, { autopilot: true }));
-  $("#book-provider").addEventListener("change", () => renderBookModels({ forceCheapest: true }));
-  for (const sel of ["#book-caption-enabled", "#book-caption-font", "#book-caption-weight"]) {
-    $(sel).addEventListener("change", renderBookCaptionUI);
-  }
-  $("#book-style-file").addEventListener("change", (ev) => {
-    const file = ev.target.files?.[0] || null;
-    if (state.stylePreviewUrl && state.stylePreviewUrl.startsWith("blob:")) {
-      URL.revokeObjectURL(state.stylePreviewUrl);
-    }
-    state.styleFile = file;
-    state.styleIsCustomUpload = Boolean(file);
-    state.selectedFontPresetId = null;
-    state.stylePreviewUrl = file ? URL.createObjectURL(file) : null;
-    renderBookStylePreview();
-    renderHomeFontPresets();
-  });
-  $("#book-style-clear").addEventListener("click", () => {
-    if (state.stylePreviewUrl && state.stylePreviewUrl.startsWith("blob:")) {
-      URL.revokeObjectURL(state.stylePreviewUrl);
-    }
-    state.styleFile = null;
-    state.styleIsCustomUpload = false;
-    state.selectedFontPresetId = null;
-    state.stylePreviewUrl = null;
-    $("#book-style-file").value = "";
-    renderBookStylePreview();
-    renderHomeFontPresets();
-  });
-  renderHomeFontPresets();
+  $("#new-book-briefing").addEventListener("click", createBookFromBriefing);
+  $("#empty-create-btn").addEventListener("click", createBookFromBriefing);
   $("#import-btn").addEventListener("click", importBackup);
 
   $$("[data-cat-filter]").forEach((btn) => {

@@ -113,8 +113,9 @@ def test_premises_and_bible_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     assert bible["title"] == "Lia e as Estrelas"
     assert bible["structure"] == "picture_book"
     assert bible["locked"] is False
-    # kids_storybook has cast=1: the bible keeps only the protagonist.
-    assert [c["name"] for c in bible["characters"]] == ["Lia"]
+    # Recurring supporting characters are kept even when the preset cast is 1: a
+    # character left out of the bible would have no model sheet and drift page to page.
+    assert [c["name"] for c in bible["characters"]] == ["Lia", "Ozzy"]
 
     locked = client.put(f"/api/sessions/{sid}/bible", json={**bible, "locked": True}).json()
     assert locked["bible"]["locked"] is True
@@ -190,3 +191,29 @@ def test_suggest_field_rejects_unknown_field() -> None:
     sid = _new_session()
     res = client.post(f"/api/sessions/{sid}/brief/suggest", json={"field": "age_band"})
     assert res.status_code == 400
+
+
+def test_premises_and_bible_plan_for_the_chosen_page_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    sid = _new_session()
+    prompts: list[str] = []
+
+    def fake_llm(_instructions: str, user_prompt: str, **_kw: object) -> str:
+        prompts.append(user_prompt)
+        if "propose" in user_prompt:
+            return json.dumps({"premises": [{"title": "A", "logline": "um"}]})
+        return BIBLE_JSON
+
+    monkeypatch.setattr(brief_mod, "_call_text_llm", fake_llm)
+    brief = {"logline": "Lia tem medo do escuro"}
+
+    # The page count saved on the book is what the story is planned for...
+    assert client.patch(f"/api/sessions/{sid}", json={"pages": 24}).status_code == 200
+    client.post(f"/api/sessions/{sid}/brief/premises", json={"brief": brief})
+    assert "Book length: 24 illustrated pages" in prompts[-1]
+
+    # ...and an explicit count sent by the briefing wins (premises and bible alike).
+    client.post(f"/api/sessions/{sid}/brief/premises", json={"brief": brief, "pages": 30})
+    assert "Book length: 30 illustrated pages" in prompts[-1]
+    client.post(f"/api/sessions/{sid}/bible/generate", json={"brief": brief, "pages": 30})
+    assert "covering pages 1 to 30" in prompts[-1]
+

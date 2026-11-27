@@ -16,8 +16,10 @@ from color_book_generator.providers.base import (
     CharacterReference,
     ImageProvider,
     ProviderError,
+    character_reference_note,
     pick_size,
     register,
+    style_reference_note,
 )
 
 _SIZES: dict[str, tuple[int, int]] = {
@@ -48,24 +50,16 @@ class CodexProvider(ImageProvider):
             prompt = f"{prompt}\n\nAvoid: {negative_prompt}"
         image_urls: list[str] = []
         if style_reference is not None:
-            prompt = (
-                f"{prompt}\n\nThe first reference image is a STRICT STYLE & LAYOUT reference: "
-                "closely match its exact drawing style, line weight, clean uncluttered background "
-                "simplicity, generous white breathing space, panel rhythm, and speech-balloon shape. "
-                "Do not copy its subject, characters, text or specific scene."
-            )
+            prompt = f"{prompt}\n\n{style_reference_note()}"
             image_urls.append(
                 "data:image/png;base64,"
                 + base64.b64encode(style_reference).decode("ascii")
             )
         if references:
-            names = ", ".join(name for name, _data in references)
-            prompt = (
-                f"{prompt}\n\nUse the reference photos to keep these characters "
-                f"recognizable (same face, hairstyle, proportions and outfit design): "
-                f"{names}. Redraw them in the requested line-art style and ignore the "
-                "photo colors and lighting."
+            note = character_reference_note(
+                [name for name, _data in references], after_style=style_reference is not None
             )
+            prompt = f"{prompt}\n\n{note}"
             image_urls.extend(
                 "data:image/png;base64," + base64.b64encode(data).decode("ascii")
                 for _name, data in references

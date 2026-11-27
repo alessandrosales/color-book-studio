@@ -281,3 +281,47 @@ def test_create_response_streams_and_extracts_text(monkeypatch, tmp_path) -> Non
     assert isinstance(captured["payload"], dict)
     assert captured["payload"]["stream"] is True
     assert captured["accept"] == "text/event-stream"
+
+
+def test_stream_retries_a_response_cut_off_mid_transfer(monkeypatch) -> None:
+    import http.client
+
+    monkeypatch.setattr(codex, "STREAM_BACKOFF_S", (0.0, 0.0))
+    calls = {"n": 0}
+
+    def flaky(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise http.client.IncompleteRead(b"x" * 8084)
+        return "data: ok"
+
+    monkeypatch.setattr(codex, "_post_stream_once", flaky)
+    assert codex._post_stream("https://x", b"{}", {}, timeout=1) == "data: ok"
+    assert calls["n"] == 3
+
+
+def test_stream_gives_a_clear_error_after_repeated_network_failures(monkeypatch) -> None:
+    import http.client
+
+    monkeypatch.setattr(codex, "STREAM_BACKOFF_S", (0.0, 0.0))
+
+    def broken(*_args, **_kwargs):
+        raise http.client.IncompleteRead(b"")
+
+    monkeypatch.setattr(codex, "_post_stream_once", broken)
+    with pytest.raises(codex.CodexAuthError, match="3 tentativas"):
+        codex._post_stream("https://x", b"{}", {}, timeout=1)
+
+
+def test_stream_does_not_retry_a_refused_request(monkeypatch) -> None:
+    calls = {"n": 0}
+
+    def refused(*_args, **_kwargs):
+        calls["n"] += 1
+        raise codex.CodexRequestError("recusada", 400)
+
+    monkeypatch.setattr(codex, "_post_stream_once", refused)
+    with pytest.raises(codex.CodexRequestError):
+        codex._post_stream("https://x", b"{}", {}, timeout=1)
+    assert calls["n"] == 1
+

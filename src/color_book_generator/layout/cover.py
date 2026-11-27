@@ -31,6 +31,8 @@ class CoverGeometry:
     trim_h: float
     spine_w: float
     bleed: float
+    # Right-to-left books (manga) open the other way: front panel on the left.
+    rtl: bool = False
 
     @property
     def total_w(self) -> float:
@@ -43,7 +45,7 @@ class CoverGeometry:
     @property
     def back_x(self) -> float:
         """Left edge of the back cover's trim area."""
-        return self.bleed
+        return self.bleed + (self.trim_w + self.spine_w if self.rtl else 0.0)
 
     @property
     def spine_x(self) -> float:
@@ -51,11 +53,12 @@ class CoverGeometry:
 
     @property
     def front_x(self) -> float:
-        return self.bleed + self.trim_w + self.spine_w
+        """Left edge of the front cover's trim area."""
+        return self.bleed + (0.0 if self.rtl else self.trim_w + self.spine_w)
 
     def barcode_box(self) -> tuple[float, float, float, float]:
-        """(x, y, w, h) in inches from the bottom-left of the sheet."""
-        x = self.spine_x - BARCODE_OFFSET_IN - BARCODE_W_IN
+        """(x, y, w, h) in inches from the bottom-left of the sheet (back panel, bottom right)."""
+        x = self.back_x + self.trim_w - BARCODE_OFFSET_IN - BARCODE_W_IN
         y = self.bleed + BARCODE_OFFSET_IN
         return (x, y, BARCODE_W_IN, BARCODE_H_IN)
 
@@ -65,9 +68,11 @@ class CoverGeometry:
 
 
 def cover_geometry(
-    trim_in: tuple[float, float], spine_in: float, bleed_in: float = 0.125
+    trim_in: tuple[float, float], spine_in: float, bleed_in: float = 0.125, *, rtl: bool = False
 ) -> CoverGeometry:
-    return CoverGeometry(trim_w=trim_in[0], trim_h=trim_in[1], spine_w=spine_in, bleed=bleed_in)
+    return CoverGeometry(
+        trim_w=trim_in[0], trim_h=trim_in[1], spine_w=spine_in, bleed=bleed_in, rtl=rtl
+    )
 
 
 def _edge_color(image: Image.Image) -> tuple[float, float, float]:
@@ -107,12 +112,13 @@ def _draw_front(c: canvas.Canvas, cover: Path, geo: CoverGeometry) -> Image.Imag
     panel_h = geo.trim_h + 2 * geo.bleed
     scale = max(panel_w / img.width, panel_h / img.height)
     draw_w, draw_h = img.width * scale, img.height * scale
-    # Anchor at the spine edge, centred vertically; overflow is cropped by the page.
-    x = geo.front_x
+    # Centred on the front panel (trim + outer bleed); overflow is cropped evenly.
+    panel_x = geo.front_x - geo.bleed if geo.rtl else geo.front_x
+    x = panel_x + (panel_w - draw_w) / 2
     y = (geo.total_h - draw_h) / 2
     c.saveState()
     path = c.beginPath()
-    path.rect(geo.front_x * inch, 0, panel_w * inch, geo.total_h * inch)
+    path.rect(panel_x * inch, 0, panel_w * inch, geo.total_h * inch)
     c.clipPath(path, stroke=0, fill=0)
     c.drawImage(ImageReader(img), x * inch, y * inch, width=draw_w * inch, height=draw_h * inch)
     c.restoreState()

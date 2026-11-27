@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from color_book_generator.auth import codex as codex_auth
+from color_book_generator.identity import CAST_RULES, match_cast_ids
 from color_book_generator.presets import StoryMode as StoryMode
 from color_book_generator.presets import StylePreset, default_page_layout_for_category
 
@@ -124,30 +125,6 @@ class FullBookBlueprint(BaseModel):
     style_anchor_subject: str
     characters: list[GeneratedCharacter] = Field(default_factory=list)
     pages: list[ScriptedPage]
-
-
-def build_character_sheet_prompt(
-    name: str,
-    description: str,
-    style_context: str,
-    sheet_template: str = "",
-) -> str:
-    """Compose a prompt to generate a consistent character reference sheet in the book style."""
-    base_template = sheet_template.strip() or (
-        "Character model sheet on a pure white background showing 3 views: "
-        "front standing full body, side/three-quarter view, and 2 expressive close-up faces. "
-        "Pure black-and-white coloring book line art, zero shading, zero gray."
-    )
-    parts = [
-        base_template,
-        f"Character name: {name.strip()}.",
-    ]
-    if description.strip():
-        parts.append(f"Visual appearance & outfit: {description.strip()}.")
-    if style_context.strip():
-        parts.append(f"Art style rules to match strictly: {style_context.strip()}.")
-    parts.append("No text labels, no watermarks, crisp closed black lines on pure white paper.")
-    return "\n\n".join(parts)
 
 
 def _extract_json_object(raw: str) -> dict[str, Any]:
@@ -335,8 +312,8 @@ def generate_story_plan(
         "Rules:\n"
         "- Generate EXACTLY the requested number of pages, numbered 1..N.\n"
         "- Every scene_prompt must describe ONE clear, drawable, high-converting coloring scene with distinct pose/setting (avoid repeating compositions).\n"
-        "- When registered characters exist, include their exact names in character_names whenever they appear in the scene.\n"
         "- Never ask for colors or shading in scene_prompt.\n"
+        f"{CAST_RULES if cast else ''}"
     )
 
     raw = _call_text_llm(
@@ -347,7 +324,7 @@ def generate_story_plan(
     )
     data = _extract_json_object(raw)
 
-    by_name = {c.name.strip().lower(): c.id for c in cast}
+    cast_pairs = [(c.id, c.name) for c in cast]
     raw_pages = data.get("pages")
     if not isinstance(raw_pages, list) or not raw_pages:
         raise StoryGenerationError("O modelo nao retornou a lista de paginas no roteiro.")
@@ -364,11 +341,7 @@ def generate_story_plan(
         title_str = str(item.get("title") or f"Página {i + 1}").strip()
         raw_names = item.get("character_names") or []
         names = [str(n).strip() for n in raw_names if isinstance(n, str) and n.strip()]
-        matched_ids = [
-            by_name[n.lower()] for n in names if n.lower() in by_name
-        ]
-        # Preserve order and deduplicate
-        unique_ids = list(dict.fromkeys(matched_ids))
+        unique_ids = match_cast_ids(names, scene, cast_pairs)
         scripted.append(
             ScriptedPage(
                 index=i + 1,
@@ -400,10 +373,16 @@ def generate_full_book_blueprint(
     story_context: str = "",
     page_beats: list[str] | None = None,
     caption_max_words: int | None = None,
+    fixed_cast: list[CharacterBrief] | None = None,
     provider: str = "",
     model: str | None = None,
 ) -> FullBookBlueprint:
-    """Invent the entire book from ONLY the selected style: title, cast, anchor, and all pages."""
+    """Write the entire book: title, cast, anchor and all pages.
+
+    With ``fixed_cast`` (the locked story bible or characters the book already has) the
+    cast is NOT invented: the pages use exactly those characters, so the book keeps the
+    identity the author approved.
+    """
     chosen_mode: StoryMode = mode or (
         preset.default_mode if preset is not None else "collection"
     )
@@ -424,7 +403,13 @@ def generate_full_book_blueprint(
         if premise_hint.strip()
         else "No user theme provided: invent an original, high-converting, commercially appealing concept that fits this category perfectly."
     )
-    if cast_size == 0:
+    if fixed_cast:
+        char_guidance = (
+            "The cast is FIXED (already designed, with model sheets): return it unchanged in "
+            "'characters' with the same names and do not create any other character:\n"
+            + "\n".join(f"- {c.name}: {c.description or 'recurring character'}" for c in fixed_cast)
+        )
+    elif cast_size == 0:
         char_guidance = (
             "Do not create any recurring characters: return an empty characters list and build "
             "every page from the style's subjects (patterns, objects, scenes)."
@@ -451,7 +436,8 @@ def generate_full_book_blueprint(
             )
         char_guidance = (
             f"Create exactly {cast_size} memorable recurring main character{plural} "
-            f"so they stay recognizable on every page. {kind_rule}"
+            f"so they stay recognizable on every page. {kind_rule} Every character that "
+            "appears on more than one page MUST be in this list."
         )
 
     instructions = (
@@ -464,7 +450,7 @@ def generate_full_book_blueprint(
         '  "synopsis": "2-3 sentence engaging book overview",\n'
         '  "style_anchor_subject": "one iconic showcase coloring scene that demonstrates the exact line weight and aesthetic of the book",\n'
         '  "characters": [\n'
-        '    {"name": "Short Name", "description": "precise visual traits: age/appearance, hairstyle, facial features, signature outfit, key accessory (black-and-white drawable details, no color names required)"}\n'
+        '    {"name": "Short Name", "description": "precise visual traits in 2-3 sentences: species/age, body proportions, head and face shape, eyes, hairstyle or fur, ONE fixed signature outfit with its shapes/patterns, footwear, ONE signature prop, any distinctive mark (black-and-white drawable details, no colors)"}\n'
         "  ],\n"
         '  "pages": [\n'
         "    {\n"
@@ -493,6 +479,7 @@ def generate_full_book_blueprint(
         "- Produce EXACTLY the requested number of pages, numbered 1..N.\n"
         "- Every page must have a distinct, joyful, high-converting composition with varied actions and props.\n"
         "- Keep all scene_prompt and character descriptions 100% suitable for clean black-and-white line art.\n"
+        f"{CAST_RULES if (fixed_cast or cast_size) else ''}"
     )
 
     raw = _call_text_llm(
@@ -505,7 +492,11 @@ def generate_full_book_blueprint(
 
     raw_chars = data.get("characters")
     characters: list[GeneratedCharacter] = []
-    if isinstance(raw_chars, list):
+    if fixed_cast:
+        characters = [
+            GeneratedCharacter(name=c.name, description=c.description) for c in fixed_cast
+        ]
+    elif isinstance(raw_chars, list):
         for item in raw_chars[:4]:
             if not isinstance(item, dict):
                 continue
@@ -655,8 +646,8 @@ def generate_bridge_page(
         f"Task: {bridge_goal}\n"
         "Rules:\n"
         "- Return ONE single scene object matching the JSON schema.\n"
-        "- When registered characters appear in the scene, include their exact names in character_names.\n"
         "- Never ask for colors or shading in scene_prompt.\n"
+        f"{CAST_RULES if cast else ''}"
     )
 
     raw = _call_text_llm(
@@ -667,7 +658,6 @@ def generate_bridge_page(
     )
     data = _extract_json_object(raw)
 
-    by_name = {c.name.strip().lower(): c.id for c in cast}
     scene = str(data.get("scene_prompt") or data.get("prompt") or "").strip()
     if not scene:
         raise StoryGenerationError("O modelo nao retornou a descricao visual da nova pagina.")
@@ -675,9 +665,7 @@ def generate_bridge_page(
     caption = str(data.get("caption_text") or data.get("caption") or "").strip()
     raw_names = data.get("character_names") or []
     names = [str(n).strip() for n in raw_names if isinstance(n, str) and n.strip()]
-    unique_ids = list(
-        dict.fromkeys(by_name[n.lower()] for n in names if n.lower() in by_name)
-    )
+    unique_ids = match_cast_ids(names, scene, [(c.id, c.name) for c in cast])
     return ScriptedPage(
         index=new_index,
         title=title_str,
@@ -773,7 +761,8 @@ def generate_book_finishing(
         "- synopsis: 2 to 4 sentences (40 to 80 words) summarising the story as on a back cover, "
         "without spoiling the final twist.\n"
         "- cover_prompt: 1 to 3 sentences describing ONE iconic cover scene with the main "
-        "character, taken from the story's most magical moment. No text or lettering.\n"
+        "character, taken from the story's most magical moment. Name the characters, never "
+        "re-describe their looks (their model sheets define them). No text or lettering.\n"
         "- front: a welcome page addressed to the young reader/artist (e.g. 'Welcome, Little "
         "Artist!'). Two short paragraphs, 70 to 120 words total: introduce the main character "
         "and the world of the story without spoiling the ending, then invite the reader to grab "

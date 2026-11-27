@@ -80,7 +80,10 @@ def test_kids_and_other_layouts_embed_text_in_exact_pattern_location() -> None:
         page_layout="single_caption",
         caption_text="Little Fox found a new friend.",
     )
-    assert "Storybook caption band" in kids
+    assert "Storybook text line" in kids
+    # The storybook pattern: a free vignette with the text on the white page, never boxed.
+    assert "NO frame, NO border" in kids
+    assert "separated by a crisp horizontal divider" not in kids
     assert "Little Fox found a new friend." in kids
 
     cozy = compose_page_prompt(

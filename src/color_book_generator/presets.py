@@ -33,10 +33,10 @@ class StylePreset(BaseModel):
     negative_prompt: str = (
         "color, gradient, shading, gray tones, halftone, screentone, watermark, signature, blurry"
     )
+    # Style notes for the character model sheet (the turnaround layout is fixed in identity.py).
     character_sheet_prompt: str = (
-        "Character model sheet on a pure white background showing the character in 3 clear views: "
-        "front standing full body, side profile, and 2 expressive close-up faces. "
-        "Clean black-and-white line art matching the book style, consistent proportions, outfit and hair details."
+        "Clean black-and-white line art matching the book style, consistent proportions, "
+        "outfit and hair details."
     )
     concept_prompt: str = ""
     default_mode: StoryMode = "collection"
@@ -128,9 +128,8 @@ _CATEGORY_DEFAULTS: dict[str, dict[str, Any]] = {
             "complex tiny details, realistic photo, text, watermark"
         ),
         "sheet": (
-            "Cozy bold-and-easy coloring book character reference sheet on pure white background: "
-            "front view, three-quarter view, and two cute expressions. Thick uniform black outlines, "
-            "soft rounded cute proportions, simple memorable outfit, zero shading, pure black and white line art."
+            "Cozy bold-and-easy look: thick uniform black outlines, soft rounded cute "
+            "proportions, simple memorable outfit, large open areas to color."
         ),
         "processing": ProcessingConfig(
             threshold="otsu",
@@ -147,9 +146,8 @@ _CATEGORY_DEFAULTS: dict[str, dict[str, Any]] = {
             "color, shading, scary, dark, complex background, tiny details, gray, gradient, text, watermark"
         ),
         "sheet": (
-            "Children's book character turnaround sheet on pure white background: "
-            "front standing pose, happy smiling pose, and close-up portrait. "
-            "Bold clean black outlines, friendly expressive eyes, simple outfit, pure black and white line art, no shading."
+            "Children's picture-book look: bold clean black outlines, friendly expressive eyes, "
+            "simple outfit with few large shapes, no tiny details."
         ),
         "processing": ProcessingConfig(
             threshold="adaptive",
@@ -168,10 +166,9 @@ _CATEGORY_DEFAULTS: dict[str, dict[str, Any]] = {
             "speech bubble, japanese text, watermark, messy sketch"
         ),
         "sheet": (
-            "Clean, uncluttered Japanese manga character design sheet (settei) on pure white background: "
-            "full-body front view, three-quarter action pose, and two facial expressions. "
-            "Smooth crisp black ink line art, simple iconic hairstyle and clean outfit with few folds "
-            "(no excessive straps, buckles, pouches, or tiny clutter), NO screentones, NO shading, pure B&W."
+            "Clean Japanese manga settei look: smooth crisp black ink lines, simple iconic "
+            "hairstyle, clean outfit with few folds (no excessive straps, buckles, pouches or "
+            "tiny clutter), no screentones."
         ),
         "processing": ProcessingConfig(
             threshold="adaptive",
@@ -189,9 +186,8 @@ _CATEGORY_DEFAULTS: dict[str, dict[str, Any]] = {
             "korean text, speech bubbles, watermark, sketchy lines"
         ),
         "sheet": (
-            "Korean manhwa character reference sheet on pure white background: "
-            "full-body front pose, back/side detail view, and two expressive close-up portraits. "
-            "Ultra-clean refined black ink line art, elegant proportions, crisp hair and costume lines, no shading or color."
+            "Korean manhwa look: ultra-clean refined black ink lines, elegant proportions, crisp "
+            "hair and costume lines."
         ),
         "processing": ProcessingConfig(
             threshold="adaptive",
@@ -208,9 +204,8 @@ _CATEGORY_DEFAULTS: dict[str, dict[str, Any]] = {
             "color, shading, realistic proportions, dark mood, gray, gradient, text, watermark, messy lines"
         ),
         "sheet": (
-            "Kawaii chibi character sheet on pure white background showing front standing pose, "
-            "happy jumping pose, and two adorable facial expressions. "
-            "Smooth medium-thick black outlines, pure black and white coloring book line art, zero shading."
+            "Kawaii chibi look: smooth medium-thick black outlines, oversized round head, tiny "
+            "body, adorable simple face."
         ),
         "processing": ProcessingConfig(
             threshold="otsu",
@@ -227,9 +222,8 @@ _CATEGORY_DEFAULTS: dict[str, dict[str, Any]] = {
             "color, gray shading, blurry, thick childish outlines, photo, gradient, text, watermark"
         ),
         "sheet": (
-            "Detailed fantasy/editorial coloring book character reference sheet on pure white background: "
-            "full-body front view and ornate close-up portrait. Fine crisp black ink line art, "
-            "ornamental outfit details, zero shading, pure black and white."
+            "Detailed editorial/fantasy look: fine crisp black ink lines, ornamental outfit "
+            "details that stay closed and colorable."
         ),
         "processing": ProcessingConfig(
             threshold="adaptive",

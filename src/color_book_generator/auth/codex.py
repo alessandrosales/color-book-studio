@@ -7,6 +7,7 @@ stored only in a private local file (mode 0600) and refreshed automatically.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import time
@@ -428,7 +429,19 @@ def create_response(
     raise CodexAuthError("O ChatGPT Plus nao retornou conteudo de texto para a solicitacao.")
 
 
-def _post_stream(url: str, payload: bytes, headers: dict[str, str], timeout: int) -> str:
+# Network hiccups that are worth trying again (the request itself was fine).
+_TRANSIENT_STATUS = {408, 429, 500, 502, 503, 504}
+_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
+    http.client.IncompleteRead,  # the response was cut off mid-transfer
+    http.client.RemoteDisconnected,
+    ConnectionError,
+    TimeoutError,
+)
+STREAM_ATTEMPTS = 3
+STREAM_BACKOFF_S = (3.0, 8.0)
+
+
+def _post_stream_once(url: str, payload: bytes, headers: dict[str, str], timeout: int) -> str:
     request = Request(url, data=payload, headers=headers, method="POST")
     try:
         with urlopen(request, timeout=timeout) as response:
@@ -440,10 +453,31 @@ def _post_stream(url: str, payload: bytes, headers: dict[str, str], timeout: int
             f"A geracao de imagem foi recusada pelo ChatGPT Plus ({error.code}){detail}",
             error.code,
         ) from error
-    except URLError as error:
-        raise CodexAuthError(
-            f"Nao foi possivel gerar a imagem: {error.reason}"
-        ) from error
+
+
+def _post_stream(url: str, payload: bytes, headers: dict[str, str], timeout: int) -> str:
+    """POST and read the whole event stream, retrying transient network failures."""
+    last: BaseException | None = None
+    for attempt in range(STREAM_ATTEMPTS):
+        if attempt:
+            time.sleep(STREAM_BACKOFF_S[min(attempt - 1, len(STREAM_BACKOFF_S) - 1)])
+        try:
+            return _post_stream_once(url, payload, headers, timeout)
+        except CodexRequestError as error:
+            if error.status not in _TRANSIENT_STATUS:
+                raise
+            last = error
+        except _TRANSIENT_ERRORS as error:
+            last = error
+        except URLError as error:
+            last = error
+    if isinstance(last, CodexRequestError):
+        raise last
+    reason = getattr(last, "reason", None) or last.__class__.__name__ if last else "sem resposta"
+    raise CodexAuthError(
+        f"Falha de conexao com o ChatGPT Plus depois de {STREAM_ATTEMPTS} tentativas ({reason}). "
+        "Continue de onde parou para tentar de novo."
+    ) from last
 
 
 def _image_payload(

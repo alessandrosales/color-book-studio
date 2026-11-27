@@ -141,3 +141,22 @@ def test_cover_endpoint_pdfx() -> None:
     res = client.post(f"/api/sessions/{sid}/cover-pdf?pdfx=true")
     assert res.status_code == 200, res.text
     assert PdfReader(io.BytesIO(res.content)).metadata.get("/GTS_PDFXVersion") == "PDF/X-3:2002"
+
+
+def test_rtl_wrap_puts_the_front_on_the_left() -> None:
+    geo = cover_geometry((6.0, 9.0), 0.1, 0.125, rtl=True)
+    assert geo.front_x == pytest.approx(0.125)
+    assert geo.back_x == pytest.approx(0.125 + 6.0 + 0.1)
+    bx, _by, bw, _bh = geo.barcode_box()
+    # Barcode stays at the bottom right of the back panel, clear of the outer trim.
+    assert bx + bw == pytest.approx(geo.back_x + 6.0 - 0.25)
+
+
+def test_short_book_spine_uses_the_publishable_page_count() -> None:
+    sid = client.post(
+        "/api/sessions", json={"pages": 4, "provider": "fake", "model": "fake-1"}
+    ).json()["id"]
+    geo = client.get(f"/api/sessions/{sid}/cover-geometry").json()
+    # KDP binds at least 24 pages, so the spine is sized for 24 even if fewer exist now.
+    assert geo["spine_mm"] == pytest.approx(24 * 0.002252 * 25.4, abs=0.05)
+

@@ -24,7 +24,18 @@ client = TestClient(app)
 
 @pytest.fixture(autouse=True)
 def _isolated_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from color_book_generator.identity import CharacterDesign
+    from color_book_generator.web.routers import studio as studio_mod
+
     monkeypatch.setattr(store, "WEB_ROOT", tmp_path / "web")
+    # Never reach a real text model from tests: designs come from a fixed stub.
+    monkeypatch.setattr(
+        studio_mod,
+        "design_character",
+        lambda **kwargs: CharacterDesign(
+            species_age=f"{kwargs['name']} design", outfit="striped scarf", always=["same scarf"]
+        ),
+    )
 
 
 def _png_bytes() -> bytes:
@@ -120,8 +131,11 @@ def test_per_book_style_and_character_sheet_pipeline() -> None:
         json={"sample_subject": "cozy bear drinking tea", "provider": "fake", "model": "fake-1"},
     )
     assert style.status_code == 200, style.text
-    assert style.json()["url"]
+    # The art anchor is the book's own; ``url`` stays the (absent) typography sample.
+    assert style.json()["anchor_url"]
+    assert style.json()["url"] is None
     assert style.json()["inherited_global"] is False
+    assert client.get(style.json()["anchor_url"]).status_code == 200
 
     # Create character without image, then generate Character Sheet
     char = client.post(
@@ -140,6 +154,11 @@ def test_per_book_style_and_character_sheet_pipeline() -> None:
     assert sheet.json()["sheet_status"] == "ready"
     assert sheet.json()["approved"] is True
     assert client.get(sheet.json()["image_url"]).status_code == 200
+    saved = store.load_session(sid)
+    assert saved is not None
+    barnaby = saved.characters[0]
+    assert barnaby.design is not None and barnaby.design.outfit == "striped scarf"
+    assert barnaby.sheet_source == barnaby.design_source != ""
 
 
 def test_story_scripting_populates_pages_and_links_characters(
@@ -330,7 +349,7 @@ def test_autopilot_generates_entire_book_from_style_only(
     for extra in book["front_extra_pages"] + book["back_extra_pages"]:
         assert extra["status"] == "done"
         assert store.extra_page_background_path(sid, extra["id"]).exists()
-    assert book["style_url"]
+    assert book["style_anchor_url"]
     assert len(book["characters"]) == 1
     assert book["characters"][0]["sheet_status"] == "ready"
     assert book["characters"][0]["approved"] is True

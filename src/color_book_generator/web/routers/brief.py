@@ -26,6 +26,7 @@ from color_book_generator.brief import (
 from color_book_generator.presets import StylePreset, get_preset
 from color_book_generator.story import StoryGenerationError
 from color_book_generator.web import store
+from color_book_generator.web.book_pipeline import sync_bible_cast
 from color_book_generator.web.line_check import (
     LineReport,
     analyze_pages,
@@ -38,7 +39,7 @@ from color_book_generator.web.routers.studio import (
     _session_book_cfg,
     _session_caption_cfg,
 )
-from color_book_generator.web.store import BookCharacter, SessionState
+from color_book_generator.web.store import SessionState
 
 router = APIRouter(prefix="/api/sessions/{sid}", tags=["brief"])
 
@@ -261,24 +262,7 @@ def import_bible_characters(sid: str) -> BibleCharactersResponse:
     state = _session(sid)
     if state.story_bible is None:
         raise HTTPException(status_code=400, detail="gere a biblia da historia primeiro")
-    existing = {c.name.strip().lower() for c in state.characters}
-    created = 0
-    for char in state.story_bible.characters:
-        key = char.name.strip().lower()
-        if not key or key in existing:
-            continue
-        description = "; ".join(
-            part for part in (char.look.strip(), char.personality.strip()) if part
-        )
-        state.characters.append(
-            BookCharacter(
-                id=store.new_character_id(),
-                name=char.name.strip(),
-                description=description[:600],
-            )
-        )
-        existing.add(key)
-        created += 1
+    created = sync_bible_cast(state)
     store.save_session(state)
     return BibleCharactersResponse(created=created, view=_view(state))
 

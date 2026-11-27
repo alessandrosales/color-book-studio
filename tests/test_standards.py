@@ -162,3 +162,15 @@ def test_reading_report_and_apply_font() -> None:
     assert abs(fixed["nominal_pt"] - fixed["font_target_pt"]) < 0.2
     preflight = client.get(f"/api/sessions/{sid}/kdp-preflight").json()
     assert not any("fonte das legendas" in w for w in preflight["warnings"])
+
+
+def test_story_generation_raises_caption_font_to_the_audience_minimum(monkeypatch: pytest.MonkeyPatch) -> None:
+    sid = _session(pages=1)
+    client.patch(f"/api/sessions/{sid}", json={"page_size": "6x9", "caption_enabled": True, "caption_font_size": 0.032})
+    client.put(f"/api/sessions/{sid}/brief", json={"age_band": "3-5", "logline": "Ursinho"})
+    fake = json.dumps({"title": "T", "synopsis": "S", "pages": [{"index": 1, "scene_prompt": "bear", "caption_text": "Oi"}]})
+    monkeypatch.setattr(story_mod, "_call_text_llm", lambda *_a, **_k: fake)
+    assert client.post(f"/api/sessions/{sid}/story/generate", json={"premise": "", "pages": 1}).status_code == 200
+    report = client.get(f"/api/sessions/{sid}/reading").json()
+    assert report["font_ok"] is True
+    assert report["nominal_pt"] == pytest.approx(report["font_target_pt"], abs=0.2)
