@@ -1675,6 +1675,13 @@ class AutopilotStatus(BaseModel):
 _autopilot_status: dict[str, AutopilotStatus] = {}
 _autopilot_cancel: set[str] = set()
 _autopilot_threads: dict[str, threading.Thread] = {}
+# "Cancelar" on a running autopilot: once it stops, forget its status instead of
+# showing "paused, continue?" on the library card.
+_autopilot_dismiss: set[str] = set()
+# Manual batches ("Gerar pendentes", "Gerar de novo fora do padrão") run page by page
+# from the browser. A stop request makes the batch's next page refuse to start; a new
+# batch (or a single page the author asks for) clears it.
+_manual_stop: set[str] = set()
 
 
 def _set_autopilot(
@@ -2215,6 +2222,9 @@ async def _run_autopilot(sid: str, req: AutopilotRequest) -> None:
             )
     finally:
         _autopilot_cancel.discard(sid)
+        if sid in _autopilot_dismiss:
+            _autopilot_dismiss.discard(sid)
+            _autopilot_status.pop(sid, None)
 
 
 def _run_autopilot_thread(sid: str, req: AutopilotRequest) -> None:
@@ -2239,6 +2249,8 @@ def start_autopilot(sid: str, body: AutopilotRequest) -> AutopilotStatus:
     if existing is not None and existing.is_alive():
         raise HTTPException(status_code=409, detail="autopilot ja esta em execucao neste livro")
     _autopilot_cancel.discard(sid)
+    _autopilot_dismiss.discard(sid)
+    _manual_stop.discard(sid)
     _set_autopilot(
         sid,
         status="running",
@@ -2286,3 +2298,107 @@ def cancel_autopilot(sid: str) -> AutopilotStatus:
         current_step=current.current_step if current else 1,
     )
     return _autopilot_status[sid]
+
+
+# --------------------------------------------------------------------------
+# Library controls: stop (pause), continue and cancel any generation of a book
+# --------------------------------------------------------------------------
+
+PAUSED_LABEL = "Geração pausada. Clique em Continuar para seguir de onde parou."
+# Detail of the 409 a paused batch gets; the browser matches it to end its loop quietly.
+GENERATION_STOPPED = "geracao pausada"
+
+
+def _autopilot_alive(sid: str) -> bool:
+    thread = _autopilot_threads.get(sid)
+    return thread is not None and thread.is_alive()
+
+
+def manual_stop_requested(sid: str) -> bool:
+    return sid in _manual_stop
+
+
+def start_manual_batch(sid: str) -> None:
+    """A new manual generation clears an earlier stop and its "paused" card."""
+    _manual_stop.discard(sid)
+    current = _autopilot_status.get(sid)
+    if current is not None and current.phase == "paused":
+        _autopilot_status.pop(sid, None)
+
+
+def _done_percent(state: SessionState) -> int:
+    total = len(state.pages)
+    done = sum(1 for p in state.pages if p.status == "done")
+    return round(done / total * 100) if total else 0
+
+
+@router.post("/generation/stop", response_model=AutopilotStatus)
+def stop_generation(sid: str) -> AutopilotStatus:
+    """Pause: the current page finishes, nothing new starts, and the card offers Continuar."""
+    state = _session(sid)
+    if _autopilot_alive(sid):
+        return cancel_autopilot(sid)
+    _manual_stop.add(sid)
+    _set_autopilot(
+        sid,
+        status="cancelled",
+        phase="paused",
+        label=PAUSED_LABEL,
+        percent=_done_percent(state),
+        current_step=_autopilot_status.get(sid, AutopilotStatus()).current_step,
+    )
+    return _autopilot_status[sid]
+
+
+@router.post("/generation/resume", response_model=AutopilotStatus, status_code=202)
+def resume_generation(sid: str) -> AutopilotStatus:
+    """Continue from where the book stopped, with the book's own language and page count."""
+    state = _session(sid)
+    return start_autopilot(
+        sid,
+        AutopilotRequest(
+            pages=len(state.pages) or None,
+            language=state.language or "en",
+            stop_after="pdf",
+            resume=True,
+        ),
+    )
+
+
+def _clear_interrupted(state: SessionState) -> bool:
+    """Forget "interrupted by a restart" marks so the card stops offering to continue."""
+    changed = False
+    for page in state.pages:
+        if page.error == store.INTERRUPTED_MESSAGE:
+            page.error = None
+            changed = True
+    for extra in (*state.front_extra_pages, *state.back_extra_pages):
+        if extra.error == store.INTERRUPTED_MESSAGE:
+            extra.error = None
+            changed = True
+    for char in state.characters:
+        if char.error == store.INTERRUPTED_MESSAGE:
+            char.error = None
+            changed = True
+    if state.cover_error == store.INTERRUPTED_MESSAGE:
+        state.cover_error = None
+        changed = True
+    return changed
+
+
+@router.post("/generation/cancel", response_model=AutopilotStatus)
+def cancel_generation(sid: str) -> AutopilotStatus:
+    """End the generation: stop after the current page and clear the card.
+
+    Pages already generated stay; the book can be finished later from its own page.
+    """
+    with store.session_lock(sid):
+        state = _session(sid)
+        _manual_stop.add(sid)
+        if _autopilot_alive(sid):
+            _autopilot_dismiss.add(sid)
+            return cancel_autopilot(sid)
+        _autopilot_status.pop(sid, None)
+        if _clear_interrupted(state):
+            store.save_session(state)
+    return AutopilotStatus()

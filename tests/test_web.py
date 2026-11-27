@@ -1020,3 +1020,86 @@ def test_cover_is_generated_in_the_books_own_trim_size() -> None:
         # 6x9 at 300 dpi (it used to come out 8.5x11 and lose its sides in the wrap).
         assert cover.size == (1800, 2700)
 
+
+
+def _library_card(sid: str) -> dict:
+    return next(b for b in client.get("/api/sessions").json() if b["id"] == sid)
+
+
+def test_library_stop_pauses_a_manual_batch_and_a_new_batch_clears_it() -> None:
+    sid = client.post("/api/sessions", json={"pages": 3, "provider": "fake"}).json()["id"]
+    assert client.post(f"/api/sessions/{sid}/pages/1/generate", json={"prompt": "a fox"}).status_code == 200
+
+    stopped = client.post(f"/api/sessions/{sid}/generation/stop").json()
+    assert stopped["status"] == "cancelled" and stopped["phase"] == "paused"
+    assert _library_card(sid)["autopilot"]["status"] == "cancelled"
+
+    # The batch's next page refuses to start...
+    nxt = client.post(f"/api/sessions/{sid}/pages/2/generate", json={"prompt": "a owl", "batch_start": False})
+    assert nxt.status_code == 409 and nxt.json()["detail"] == "geracao pausada"
+    # ...but a new batch (or a single page) runs and clears the paused card.
+    again = client.post(f"/api/sessions/{sid}/pages/2/generate", json={"prompt": "a owl"})
+    assert again.status_code == 200 and again.json()["status"] == "done"
+    card = _library_card(sid)["autopilot"]
+    assert card is None or card["phase"] != "paused"  # a running batch may still show as manual
+
+
+def test_library_cancel_clears_the_card_and_keeps_pages() -> None:
+    sid = client.post("/api/sessions", json={"pages": 2, "provider": "fake"}).json()["id"]
+    assert client.post(f"/api/sessions/{sid}/pages/1/generate", json={"prompt": "a fox"}).status_code == 200
+    state = store.load_session(sid)
+    assert state is not None
+    state.pages[1].status, state.pages[1].error = "error", store.INTERRUPTED_MESSAGE
+    store.save_session(state)
+    assert _library_card(sid)["autopilot"]["phase"] == "interrupted"
+
+    res = client.post(f"/api/sessions/{sid}/generation/cancel")
+    assert res.status_code == 200 and res.json()["status"] == "idle"
+    card = _library_card(sid)
+    assert card["autopilot"] is None and card["done"] == 1
+    assert store.load_session(sid).pages[1].error is None  # type: ignore[union-attr]
+    # A batch still running in a book tab stops at its next page.
+    nxt = client.post(f"/api/sessions/{sid}/pages/2/generate", json={"prompt": "x", "batch_start": False})
+    assert nxt.status_code == 409
+
+
+def test_library_resume_continues_with_the_books_own_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    from color_book_generator.web.routers import studio as studio_mod
+
+    sid = client.post("/api/sessions", json={"pages": 3, "provider": "fake"}).json()["id"]
+    state = store.load_session(sid)
+    assert state is not None
+    state.language = "pt"
+    store.save_session(state)
+    seen: list[object] = []
+
+    def _start(_sid: str, body: object) -> studio_mod.AutopilotStatus:
+        seen.append(body)
+        return studio_mod.AutopilotStatus(status="running")
+
+    monkeypatch.setattr(studio_mod, "start_autopilot", _start)
+    assert client.post(f"/api/sessions/{sid}/generation/resume").status_code == 202
+    req = seen[0]
+    assert isinstance(req, studio_mod.AutopilotRequest)
+    assert req.resume is True and req.language == "pt" and req.pages == 3 and req.stop_after == "pdf"
+
+
+def test_pages_of_one_book_can_generate_in_parallel_without_losing_each_other() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    sid = client.post("/api/sessions", json={"pages": 4, "provider": "fake"}).json()["id"]
+    # The anchor is drawn once first, as the browser does before going parallel.
+    assert client.post(f"/api/sessions/{sid}/pages/1/generate", json={"prompt": "page 1"}).status_code == 200
+
+    def _gen(index: int) -> int:
+        with TestClient(app) as own:  # one client per thread, like separate browser requests
+            return own.post(
+                f"/api/sessions/{sid}/pages/{index}/generate",
+                json={"prompt": f"page {index}", "batch_start": index == 2},
+            ).status_code
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        assert list(pool.map(_gen, [2, 3, 4])) == [200, 200, 200]
+    pages = client.get(f"/api/sessions/{sid}").json()["pages"]
+    assert [p["status"] for p in pages] == ["done"] * 4
+    assert [p["prompt"] for p in pages] == [f"page {i}" for i in range(1, 5)]

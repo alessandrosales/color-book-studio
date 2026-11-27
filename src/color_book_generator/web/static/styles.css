@@ -978,8 +978,17 @@ textarea.field {
   transition: width 600ms ease;
 }
 
-.book-card.is-gen-stopped .book-gen-label {
+/* Paused by the author reads as neutral; only a real failure is red. */
+.book-card.is-gen-error .book-gen-label {
   color: var(--danger, #b42318);
+}
+
+.book-gen-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
 }
 
 .book-card.is-just-started {

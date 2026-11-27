@@ -152,6 +152,11 @@ function renderBooks({ animate = false } = {}) {
           <div class="book-progress-fill" style="width: ${pct}%;"></div>
         </div>
         <p class="book-gen-label is-hidden" role="status" aria-live="polite"></p>
+        <div class="book-gen-actions is-hidden">
+          <button class="btn btn-outline btn-sm" type="button" data-gen="stop">Parar</button>
+          <button class="btn btn-primary btn-sm" type="button" data-gen="resume">Continuar</button>
+          <button class="btn btn-danger-ghost btn-sm" type="button" data-gen="cancel">Cancelar</button>
+        </div>
         <div class="book-meta-line">
           <span>${book.done}/${book.pages} págs</span>
           <span>${formatPageSize(book.page_size)}</span>
@@ -169,6 +174,9 @@ function renderBooks({ animate = false } = {}) {
     li.querySelector(".book-title").textContent = book.title;
     li.querySelector(".book-cat-pill").textContent = catLabel;
     applyAutopilotToCard(li, book);
+    li.querySelectorAll("[data-gen]").forEach((btn) => {
+      btn.addEventListener("click", () => controlGeneration(li, book.id, btn.dataset.gen));
+    });
     li.querySelector(".book-select-input").addEventListener("change", (ev) => {
       if (ev.target.checked) {
         state.selectedBookIds.add(book.id);
@@ -198,9 +206,39 @@ function renderBooks({ animate = false } = {}) {
 }
 
 const GEN_STATE_TEXT = {
-  error: "A geração parou com erro. Abra o livro para continuar de onde parou.",
-  cancelled: "Geração cancelada. Abra o livro para continuar de onde parou.",
+  error: "A geração parou com erro. Clique em Continuar para tentar de onde parou.",
+  cancelled: "Geração pausada. Clique em Continuar para seguir de onde parou.",
 };
+
+function applyGenerationButtons(li, ap) {
+  const running = ap?.status === "running";
+  li.querySelector(".book-gen-actions").classList.toggle("is-hidden", !ap);
+  const stop = li.querySelector('[data-gen="stop"]');
+  stop.classList.toggle("is-hidden", !running);
+  stop.disabled = Boolean(ap?.cancelling);
+  stop.textContent = ap?.cancelling ? "Parando…" : "Parar";
+  li.querySelector('[data-gen="resume"]').classList.toggle("is-hidden", !ap || running);
+}
+
+const GEN_ACTIONS = {
+  stop: { path: "stop", done: "A geração para depois da página atual." },
+  resume: { path: "resume", done: "Geração retomada de onde parou." },
+  cancel: { path: "cancel", done: "Geração cancelada. As páginas já geradas foram mantidas." },
+};
+
+async function controlGeneration(li, id, action) {
+  const { path, done } = GEN_ACTIONS[action];
+  const buttons = li.querySelectorAll("[data-gen]");
+  buttons.forEach((btn) => { btn.disabled = true; });
+  try {
+    await api(`/api/sessions/${id}/generation/${path}`, { method: "POST" });
+    toast(done);
+    await loadBooks();
+  } catch (err) {
+    toast(err.message, true);
+    buttons.forEach((btn) => { btn.disabled = false; });
+  }
+}
 
 function applyAutopilotToCard(li, book) {
   const ap = book.autopilot;
@@ -211,8 +249,10 @@ function applyAutopilotToCard(li, book) {
   const track = li.querySelector(".book-progress-track");
   li.classList.toggle("is-generating", running);
   li.classList.toggle("is-gen-stopped", Boolean(ap) && !running);
+  li.classList.toggle("is-gen-error", ap?.status === "error");
   overlay.classList.toggle("is-hidden", !running);
   label.classList.toggle("is-hidden", !ap);
+  applyGenerationButtons(li, ap);
   if (!ap) {
     const pct = book.pages ? Math.round((book.done / book.pages) * 100) : 0;
     fill.style.width = `${pct}%`;
@@ -221,7 +261,7 @@ function applyAutopilotToCard(li, book) {
   }
   const pct = Math.max(0, Math.min(100, ap.percent || 0));
   fill.style.width = `${running ? pct : (book.pages ? Math.round((book.done / book.pages) * 100) : 0)}%`;
-  track.title = running ? `Gerando: ${pct}%` : "Geração interrompida";
+  track.title = running ? `Gerando: ${pct}%` : "Geração pausada";
   li.querySelector(".book-gen-pct").textContent = `${pct}%`;
   label.textContent = running
     ? ap.label || "Gerando livro…"
@@ -266,7 +306,8 @@ async function pollGeneration() {
     }
   }
   for (const book of finished) {
-    if (book.autopilot) toast(`"${book.title}": a geração parou. Abra o livro para continuar.`, true);
+    if (book.autopilot?.status === "cancelled") toast(`"${book.title}": geração pausada.`);
+    else if (book.autopilot) toast(`"${book.title}": a geração parou. Clique em Continuar no card.`, true);
     else if (book.pages && book.done >= book.pages) toast(`"${book.title}" está pronto!`);
   }
   scheduleGenerationPolling();
@@ -551,4 +592,4 @@ async function init() {
   syncAllPopoverSelects();
 }
 
-init();
+init().catch((err) => toast(`Não foi possível carregar a biblioteca: ${err.message}`, true));

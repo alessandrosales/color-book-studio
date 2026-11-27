@@ -65,6 +65,7 @@ from color_book_generator.web.reading import build_report
 from color_book_generator.web.routers.brief import router as brief_router
 from color_book_generator.web.routers.presets import router as presets_router
 from color_book_generator.web.routers.studio import (
+    GENERATION_STOPPED,
     AutopilotStatus,
     BookCharacterView,
     ExtraPageView,
@@ -73,7 +74,9 @@ from color_book_generator.web.routers.studio import (
     _style_anchor_view,
     autopilot_snapshot,
     ensure_book_anchor,
+    manual_stop_requested,
     read_upload_limited,
+    start_manual_batch,
 )
 from color_book_generator.web.routers.studio import (
     _character_view as _book_character_view,
@@ -347,6 +350,8 @@ class GenerateRequest(BaseModel):
     model: str | None = None
     seed: int | None = None
     candidates: int | None = Field(default=None, ge=1, le=4)
+    # False for the second and later pages of a batch: those stop when the author pauses.
+    batch_start: bool = True
 
 
 class PagePatch(BaseModel):
@@ -1213,7 +1218,8 @@ def list_sessions() -> list[SessionSummary]:
                 characters_count=len(state.characters),
                 autopilot=(
                     autopilot_snapshot(state.id)
-                    or _manual_generation_snapshot(state)
+                    # A stopped batch still shows its last page finishing; hide it.
+                    or (None if manual_stop_requested(state.id) else _manual_generation_snapshot(state))
                     or _interrupted_snapshot(state)
                 ),
             )
@@ -1330,6 +1336,10 @@ def patch_session(sid: str, body: SessionPatch) -> SessionView:
 async def generate_page(sid: str, index: int, body: GenerateRequest) -> PageView:
     state = _session(sid)
     page = _page(state, index)
+    if body.batch_start:
+        start_manual_batch(sid)
+    elif manual_stop_requested(sid):
+        raise HTTPException(status_code=409, detail=GENERATION_STOPPED)
     cfg = _session_cfg(state)
 
     context = (body.context_prompt or state.context_prompt).strip()

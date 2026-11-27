@@ -1183,11 +1183,12 @@ async function regenerateOffStandard(indexes, button) {
   const original = button.textContent;
   button.disabled = true;
   try {
-    for (const [i, page] of pages.entries()) {
-      button.textContent = `Gerando ${i + 1} de ${pages.length}…`;
-      await generateOnePage(page.index, page.prompt, page.caption_text, page.character_ids);
+    const { done, stopped } = await generateBatch(pages, (finished, total) => {
+      button.textContent = `Gerando ${total} páginas: ${finished} concluídas…`;
+    });
+    if (!stopped) {
+      toast(`${plural(done, "página fora do padrão gerada", "páginas fora do padrão geradas")} de novo. Gere o PDF de novo.`);
     }
-    toast(`${plural(pages.length, "página fora do padrão gerada", "páginas fora do padrão geradas")} de novo. Gere o PDF de novo.`);
   } finally {
     button.disabled = false;
     button.textContent = original;
@@ -1366,7 +1367,11 @@ async function detectReferenceTypography(silent = false) {
   }
 }
 
-async function generateOnePage(index, prompt, captionText, characterIds) {
+// Server detail when the author paused generation (library card); ends a batch quietly.
+const GENERATION_STOPPED = "geracao pausada";
+
+// Returns "done", "stopped" (paused from the library) or "error".
+async function generateOnePage(index, prompt, captionText, characterIds, { batchStart = true } = {}) {
   state.busyPages.add(index);
   renderStage3StoryAndPages();
   try {
@@ -1378,16 +1383,61 @@ async function generateOnePage(index, prompt, captionText, characterIds) {
         character_ids: characterIds,
         provider: $("#provider").value || state.session.provider,
         model: $("#model").value.trim() || state.session.model,
+        batch_start: batchStart,
       }),
     });
     await reloadSession();
     toast(`Página ${index} gerada.`);
+    return "done";
   } catch (err) {
+    if (err.message === GENERATION_STOPPED) return "stopped";
     toast(err.message, true);
+    return "error";
   } finally {
     state.busyPages.delete(index);
     renderStage3StoryAndPages();
   }
+}
+
+// Pages drawn at the same time. Each page is its own request on the server; more than a
+// few at once mostly queues at the image provider and risks its rate limit.
+const PAGE_CONCURRENCY = 4;
+
+// Generates ``pages`` in parallel (PAGE_CONCURRENCY at a time) and returns
+// { done, stopped }. Only the requests that start right away open the batch; later ones
+// are refused once the author pauses from the library. Without a style anchor, the first
+// page runs alone so the anchor is drawn once instead of by every parallel request.
+async function generateBatch(pages, onProgress = () => {}) {
+  let next = 0;
+  let done = 0;
+  let finished = 0;
+  let stopped = false;
+  const runOne = async (page, batchStart) => {
+    const result = await generateOnePage(page.index, page.prompt, page.caption_text, page.character_ids, {
+      batchStart,
+    });
+    if (result === "stopped") {
+      stopped = true;
+      return;
+    }
+    if (result === "done") done += 1;
+    finished += 1;
+    onProgress(finished, pages.length);
+  };
+  const worker = async (batchStart) => {
+    while (!stopped && next < pages.length) {
+      await runOne(pages[next++], batchStart);
+      batchStart = false;
+    }
+  };
+  onProgress(0, pages.length);
+  if (!state.session.style_anchor_url && pages.length) {
+    await runOne(pages[next++], true);
+  }
+  // Each worker's first request starts immediately, so it may open the batch.
+  await Promise.all(Array.from({ length: PAGE_CONCURRENCY }, () => worker(true)));
+  if (stopped) toast(`Geração pausada depois de ${plural(done, "página", "páginas")}.`);
+  return { done, stopped };
 }
 
 async function generateAllPending() {
@@ -1398,11 +1448,9 @@ async function generateAllPending() {
   }
   const btn = $("#generate-pending");
   btn.disabled = true;
-  for (const page of pending) {
-    await generateOnePage(page.index, page.prompt, page.caption_text, page.character_ids);
-  }
+  const { stopped } = await generateBatch(pending);
   btn.disabled = false;
-  toast("Fila de geração concluída.");
+  if (!stopped) toast("Fila de geração concluída.");
 }
 
 async function composePdfAction() {

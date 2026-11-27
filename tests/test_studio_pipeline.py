@@ -1030,6 +1030,58 @@ def test_publisher_logo_upload_and_pdf(tmp_path: Path) -> None:
     assert client.get(f"/api/sessions/{sid}").json()["publisher_logo_url"] is None
 
 
+def test_library_cancel_stops_autopilot_and_clears_its_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time
+
+    from color_book_generator import story as story_mod
+    from color_book_generator.web.routers import studio as studio_mod
+
+    def _fake_blueprint(**_kwargs: object) -> story_mod.FullBookBlueprint:
+        return story_mod.FullBookBlueprint(
+            title="Patos",
+            premise="Um pato aprende a andar",
+            synopsis="Um patinho e seus amigos.",
+            mode="narrative",
+            style_anchor_subject="a duckling",
+            characters=[story_mod.GeneratedCharacter(name="Tumble", description="patinho")],
+            pages=[
+                story_mod.ScriptedPage(index=i, title=f"P{i}", scene_prompt=f"Scene {i}", caption_text="Oi!",
+                                       character_names=["Tumble"])
+                for i in (1, 2, 3)
+            ],
+        )
+
+    monkeypatch.setattr(studio_mod, "generate_full_book_blueprint", _fake_blueprint)
+    _stub_finishing(monkeypatch)
+    sid = client.post(
+        "/api/sessions", json={"pages": 3, "provider": "fake", "model": "fake-1", "preset_id": "kids_storybook"}
+    ).json()["id"]
+    original_gen = studio_mod.generate_matching
+
+    def _cancel_after_page_one(provider, prompt, **kwargs):  # type: ignore[no-untyped-def]
+        img = original_gen(provider, prompt, **kwargs)
+        if "Page 1 of 3." in prompt:
+            studio_mod.cancel_generation(sid)  # what the library card's "Cancelar" calls
+        return img
+
+    monkeypatch.setattr(studio_mod, "generate_matching", _cancel_after_page_one)
+    assert client.post(f"/api/sessions/{sid}/generation/resume").status_code == 202
+
+    status: dict[str, object] = {}
+    for _ in range(200):
+        status = client.get(f"/api/sessions/{sid}/autopilot").json()
+        if status["status"] != "running":
+            break
+        time.sleep(0.05)
+    assert status["status"] == "idle", status  # dismissed, not "paused, continue?"
+    card = next(b for b in client.get("/api/sessions").json() if b["id"] == sid)
+    assert card["autopilot"] is None
+    pages = client.get(f"/api/sessions/{sid}").json()["pages"]
+    assert [p["status"] for p in pages] == ["done", "pending", "pending"]
+
+
 def test_autopilot_finishing_failure_still_composes_pdf(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
