@@ -641,19 +641,7 @@ def _extra_page_images(
 
 def _write_page_assets(state: SessionState, page: PageState, img: Image.Image) -> None:
     cfg = _session_cfg(state)
-    has_embedded_text = state.caption_enabled and bool(page.caption_text.strip())
-    processing = (
-        cfg.processing.model_copy(
-            update={"min_component_px": min(cfg.processing.min_component_px, 12)}
-        )
-        if has_embedded_text
-        else cfg.processing
-    )
-    processed = prepare_page(
-        img,
-        cfg.image_px,
-        processing,
-    )
+    processed = prepare_page(img, cfg.image_px, book_pipeline.page_processing(state, page, cfg))
     processed = finish_new_page(state, page, processed, cfg.dpi)
     name = f"page-{page.index:03d}.png"
     img.save(store.raw_dir(state.id) / name, "PNG")

@@ -73,19 +73,19 @@ KDP define o 8,5 × 11 como o formato mais vendido de colorir, com o quadrado 8,
 
 ## 3. Padrões visuais por categoria (traço, densidade, composição)
 
-Números de espessura são **[prática]**: as fontes discordam entre si (3–5 pt num lugar, 1,5–2 pt contorno e 0,5–1 pt detalhe em outro) [fonte]. O caminho certo é medir a linha no PNG final (seção 6.3) e calibrar com uma prova impressa.
+Números de espessura são **[prática]**. A única regra oficial da KDP é linha de pelo menos **0,75 pt (0,3 mm)** [fonte: KDP paperback file guidelines]. Guias de mercado usam cerca de **2–4 pt (0,7–1,4 mm)** para infantil e **0,5–1,5 pt** para adulto detalhado [prática]. A linha 3–5 foi calibrada em páginas de livro infantil limpas (traço ≈ 1 mm, 20–90 áreas menores que 5 mm). Traço muito mais grosso engole olhos, bicos e o texto da página. O app mede a linha no PNG final (seção 6.3); calibre com uma prova impressa.
 
-| Categoria / estilo | Contorno principal | Detalhe interno | Menor área fechada | Elementos por página | Fundo |
+| Categoria / estilo | Contorno principal | Menor área fechada | Áreas menores toleradas | Elementos por página | Fundo |
 |---|---|---|---|---|---|
-| Toddler (1–3 anos) | 2,5–4 mm | nenhum | ≥ 15 mm | 1–5 formas [fonte] | nenhum |
-| Infantil 3–5 | 1,5–2,5 mm (1–2 mm aos 4 anos) [fonte] | 1 mm | ≥ 8 mm | 1 sujeito + 2–4 objetos | simples |
-| Infantil 6–9 | 1–1,5 mm | 0,5–0,8 mm | ≥ 5 mm | cena completa | moderado |
-| Bold & Easy / Cozy | 1,5–2,5 mm, monolinha | 1 mm | ≥ 6 mm, **sem ilhas minúsculas** [fonte] | 1 cena enquadrada | moderado |
-| Kawaii | 1–1,5 mm, cantos redondos | 0,6 mm | ≥ 5 mm | grade 2×2 ou cluster | estrelas/corações |
-| Mangá / Manhwa | 0,6–1 mm (variação de pena) | 0,3–0,5 mm | ≥ 3 mm | 3–6 quadros, 1 foco por quadro | mínimo; **sem retícula** |
-| Adulto intricado | 0,5–0,8 mm | 0,25–0,4 mm | ≥ 2 mm | simetria/padrão denso | denso |
+| Toddler (1–3 anos) | 1–2 mm | ≥ 8 mm | 30 | 1–5 formas [fonte] | nenhum |
+| Infantil 3–5 | 0,7–1,4 mm | ≥ 5 mm | 90 | 1 sujeito + 2–4 objetos | simples |
+| Infantil 6–9 | 0,5–1 mm | ≥ 4 mm | 150 | cena completa | moderado |
+| Bold & Easy / Cozy | 0,8–1,6 mm, monolinha | ≥ 5 mm, **sem ilhas minúsculas** [fonte] | 90 | 1 cena enquadrada | moderado |
+| Kawaii | 0,5–1 mm, cantos redondos | ≥ 4 mm | 150 | grade 2×2 ou cluster | estrelas/corações |
+| Mangá / Manhwa | 0,3–0,8 mm (variação de pena) | ≥ 2 mm | 400 | 3–6 quadros, 1 foco por quadro | mínimo; **sem retícula** |
+| Adulto intricado | 0,3–0,6 mm | ≥ 1,5 mm | 2000 | simetria/padrão denso | denso |
 
-Linha abaixo de **0,25 mm (~0,7 pt)** some ou falha em impressão digital [prática]. A 300 dpi, 1 mm ≈ 11,8 px.
+Nenhum padrão fica abaixo de **0,3 mm**, o mínimo da KDP. A 300 dpi, 1 mm ≈ 11,8 px.
 
 **Regras de composição que valem para todas as categorias:**
 - Contornos fechados (sem vazamento ao colorir, já é o que `_RULES` pede).

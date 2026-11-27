@@ -7,6 +7,8 @@ from pathlib import Path
 from PIL import Image
 from pydantic import BaseModel, Field
 
+from color_book_generator.config import BookConfig
+from color_book_generator.processing.line_art import prepare_page
 from color_book_generator.processing.line_qa import (
     AUTO_THICKEN_MM,
     MAX_THICKEN_MM,
@@ -18,6 +20,7 @@ from color_book_generator.processing.line_qa import (
 )
 from color_book_generator.standards import LineStandard, line_standard
 from color_book_generator.web import store
+from color_book_generator.web.book_pipeline import page_processing
 from color_book_generator.web.store import PageState, SessionState
 
 
@@ -57,14 +60,18 @@ def _save_preview(img: Image.Image, path: Path) -> None:
 
 
 def thicken_page(state: SessionState, page: PageState, dpi: int) -> int:
-    """Thicken the saved page up to the standard (at most MAX_THICKEN_MM); returns px added."""
+    """Thicken the saved page up to the standard (at most MAX_THICKEN_MM); returns px added.
+
+    The decision comes from measuring the file on disk, never from stored metrics: those
+    can be stale (another request already thickened the file), and thickening on top of a
+    thickened page compounds until eyes, beaks and lettering turn into blobs.
+    """
     path = store.page_file(state.id, page.index)
     if not path.exists():
         return 0
     with Image.open(path) as raw:
         img = raw.convert("L")
-    if page.line_main_mm is None:
-        record_metrics(state, page, img, dpi)
+    record_metrics(state, page, img, dpi)
     add = thicken_px_needed(page.line_main_mm, standard_for(state).line_min_mm, dpi, MAX_THICKEN_MM)
     if not add:
         return 0
@@ -74,6 +81,24 @@ def thicken_page(state: SessionState, page: PageState, dpi: int) -> int:
     page.line_fixed_px += add
     record_metrics(state, page, fixed, dpi)
     return add
+
+
+def reprocess_page(state: SessionState, page: PageState, cfg: BookConfig) -> bool:
+    """Rebuild the page from the model's original image, dropping any manual thickening.
+
+    Runs the same cleanup as a fresh generation (threshold, fit, quiet auto-thicken), so
+    no new image is generated. Returns False when the original is not on disk.
+    """
+    name = store.page_file(state.id, page.index).name
+    raw_path = store.raw_dir(state.id) / name
+    if page.status != "done" or not raw_path.exists():
+        return False
+    with Image.open(raw_path) as raw:
+        processed = prepare_page(raw, cfg.image_px, page_processing(state, page, cfg))
+    processed = finish_new_page(state, page, processed, cfg.dpi)
+    processed.save(store.page_file(state.id, page.index), "PNG", dpi=(cfg.dpi, cfg.dpi))
+    _save_preview(processed, store.preview_dir(state.id) / name)
+    return True
 
 
 class PageLineStatus(BaseModel):

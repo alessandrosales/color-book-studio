@@ -1121,6 +1121,7 @@ function renderLinesPanel() {
     }),
   );
   $("#lines-thicken-all").classList.toggle("is-hidden", !r.pages.some((p) => p.fixable));
+  $("#lines-reprocess").classList.toggle("is-hidden", !r.pages.some((p) => p.fixed_px > 0));
   $("#lines-regenerate-slot").replaceChildren(...(r.off_standard?.length ? [offStandardButton(r.off_standard)] : []));
   $$("#page-list .page-card").forEach(renderPageLine);
 }
@@ -1135,20 +1136,42 @@ const refreshLines = debounce(async () => {
   }
 }, 400);
 
-async function thickenLines(pageIndex = null) {
-  const query = pageIndex == null ? "" : `?page=${pageIndex}`;
+// One line-fix request at a time: a second click while the first runs would act on stale state.
+let lineFixBusy = false;
+
+async function runLineFix(path, describe) {
+  if (lineFixBusy) return;
+  lineFixBusy = true;
+  const buttons = [$("#lines-thicken-all"), $("#lines-reprocess"), ...$$(".page-thicken-btn")];
+  buttons.forEach((btn) => { btn.disabled = true; });
   try {
-    const res = await api(`/api/sessions/${state.sid}/lines/thicken${query}`, { method: "POST" });
+    const res = await api(`/api/sessions/${state.sid}/lines/${path}`, { method: "POST" });
     state.lines = res.report;
     await reloadSession();
-    toast(
-      res.pages_fixed.length
-        ? `Traço engrossado em ${plural(res.pages_fixed.length, "página", "páginas")}. Gere o PDF de novo.`
-        : "Nenhuma página precisou (ou pôde) ser engrossada.",
-    );
+    toast(describe(res));
   } catch (err) {
     toast(err.message, true);
+  } finally {
+    lineFixBusy = false;
+    buttons.forEach((btn) => { btn.disabled = false; });
   }
+}
+
+function thickenLines(pageIndex = null) {
+  const query = pageIndex == null ? "" : `?page=${pageIndex}`;
+  return runLineFix(`thicken${query}`, (res) =>
+    res.pages_fixed.length
+      ? `Traço engrossado em ${plural(res.pages_fixed.length, "página", "páginas")}. Gere o PDF de novo.`
+      : "Nenhuma página precisou (ou pôde) ser engrossada.",
+  );
+}
+
+function reprocessLines() {
+  return runLineFix("reprocess", (res) =>
+    res.pages_reprocessed.length
+      ? `${plural(res.pages_reprocessed.length, "página refeita", "páginas refeitas")} a partir do original. Gere o PDF de novo.`
+      : "Nenhuma página tinha o original salvo para refazer.",
+  );
 }
 
 // Regenerates, one at a time, the pages the line check flagged (thin, thick or too busy).
@@ -2328,6 +2351,7 @@ async function init() {
   refreshReading();
   refreshLines();
   $("#lines-thicken-all").addEventListener("click", () => thickenLines());
+  $("#lines-reprocess").addEventListener("click", () => reprocessLines());
   $("#lines-reanalyze").addEventListener("click", async () => {
     try {
       state.lines = await api(`/api/sessions/${state.sid}/lines/analyze`, { method: "POST" });

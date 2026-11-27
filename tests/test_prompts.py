@@ -140,11 +140,18 @@ def test_empty_caption_forbids_empty_speech_balloons_in_manga() -> None:
 
 def test_line_standard_directive_states_the_checked_targets() -> None:
     kids = line_standard_directive(LINE_STANDARDS["3-5"])
-    assert "1.5 to 2.5 mm" in kids
-    assert "at least 8 mm across" in kids
-    assert "at most about 30 small closed shapes" in kids
+    assert "0.7 to 1.4 mm" in kids
+    assert "marker" not in kids  # thick marker strokes swallow small details
+    assert "at least 5 mm across" in kids
+    assert "at most about 90 small closed shapes" in kids
     assert "NO hatching" in kids
 
     adult = line_standard_directive(LINE_STANDARDS["intricate"])
-    assert "0.5 to 0.8 mm" in adult
+    assert "0.3 to 0.6 mm" in adult
     assert "at most about" not in adult  # dense detail is the point of adult pages
+
+
+def test_no_line_standard_goes_below_kdp_minimum() -> None:
+    from color_book_generator.standards import KDP_MIN_LINE_MM
+
+    assert all(std.line_min_mm >= KDP_MIN_LINE_MM for std in LINE_STANDARDS.values())

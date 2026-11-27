@@ -140,6 +140,15 @@ def book_world(state: SessionState) -> str:
     return state.story_premise.strip()[:400]
 
 
+def page_processing(state: SessionState, page: PageState, cfg: BookConfig) -> ProcessingConfig:
+    """Line-art cleanup for one page; lettered pages keep smaller specks (dots, accents)."""
+    if state.caption_enabled and page.caption_text.strip():
+        return cfg.processing.model_copy(
+            update={"min_component_px": min(cfg.processing.min_component_px, 12)}
+        )
+    return cfg.processing
+
+
 def page_job(
     state: SessionState,
     page: PageState,
@@ -177,17 +186,10 @@ def page_job(
     negative = effective_negative_prompt(
         cfg.negative_prompt, has_embedded_text=bool(embedded_text), page_layout=layout
     )
-    processing = (
-        cfg.processing.model_copy(
-            update={"min_component_px": min(cfg.processing.min_component_px, 12)}
-        )
-        if embedded_text
-        else cfg.processing
-    )
     return ImageJob(
         prompt=prompt,
         negative_prompt=negative,
-        processing=processing,
+        processing=page_processing(state, page, cfg),
         references=character_references(state, ids),
         style_reference=store.load_session_style_bytes(state.id),
     )

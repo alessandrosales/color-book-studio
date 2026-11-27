@@ -110,13 +110,13 @@ def _book_with_page(img: Image.Image) -> str:
 
 
 def test_lines_report_and_thicken_endpoint() -> None:
-    # 1.2 mm strokes on a 3-5 book (target 1.5 mm): thin but fixable.
-    sid = _book_with_page(_drawing(14, size=(2550, 3300)))
+    # 0.5 mm strokes on a 3-5 book (target 0.7 mm): thin but fixable.
+    sid = _book_with_page(_drawing(6, size=(2550, 3300)))
     report = client.get(f"/api/sessions/{sid}/lines").json()
     assert report["standard"] == "3-5"
     page = report["pages"][0]
     assert page["status"] == "thin" and page["fixable"] is True
-    assert any("abaixo de 1.5 mm" in w for w in report["warnings"])
+    assert any("abaixo de 0.7 mm" in w for w in report["warnings"])
     assert report["off_standard"] == [1]
     assert client.get(f"/api/sessions/{sid}/kdp-preflight").json()["off_standard_pages"] == [1]
 
@@ -124,13 +124,57 @@ def test_lines_report_and_thicken_endpoint() -> None:
     assert res["pages_fixed"] == [1]
     fixed = res["report"]["pages"][0]
     assert fixed["status"] == "ok" and fixed["fixed_px"] > 0
-    assert store.load_session(sid).pages[0].line_main_mm >= 1.45  # type: ignore[union-attr]
+    assert store.load_session(sid).pages[0].line_main_mm >= 0.65  # type: ignore[union-attr]
 
     preflight = client.get(f"/api/sessions/{sid}/kdp-preflight").json()
-    assert not any("abaixo de 1.5 mm" in w for w in preflight["warnings"])
+    assert not any("abaixo de 0.7 mm" in w for w in preflight["warnings"])
     assert preflight["off_standard_pages"] == []
 
 
 def test_thicken_unknown_page_is_404() -> None:
-    sid = _book_with_page(_drawing(14, size=(2550, 3300)))
+    sid = _book_with_page(_drawing(6, size=(2550, 3300)))
     assert client.post(f"/api/sessions/{sid}/lines/thicken?page=9").status_code == 404
+
+
+def test_thicken_twice_does_not_compound_even_with_stale_metrics() -> None:
+    # A second request that still holds the old (thin) metrics must measure the file,
+    # not thicken an already thickened page again.
+    sid = _book_with_page(_drawing(6, size=(2550, 3300)))
+    client.get(f"/api/sessions/{sid}/lines")
+    stale = store.load_session(sid)
+    assert stale is not None
+    assert client.post(f"/api/sessions/{sid}/lines/thicken").json()["pages_fixed"] == [1]
+    once = store.page_file(sid, 1).read_bytes()
+
+    store.save_session(stale)  # metrics on disk say "thin" again
+    assert client.post(f"/api/sessions/{sid}/lines/thicken").json()["pages_fixed"] == []
+    assert store.page_file(sid, 1).read_bytes() == once
+
+
+def test_reprocess_rebuilds_thickened_page_from_the_original() -> None:
+    original = _drawing(10, size=(1100, 1425))
+    sid = _book_with_page(_drawing(40, size=(2550, 3300)))  # a page thickened into blobs
+    state = store.load_session(sid)
+    assert state is not None
+    state.pages[0].line_fixed_px = 12
+    store.save_session(state)
+    store.raw_dir(sid).mkdir(parents=True, exist_ok=True)
+    original.save(store.raw_dir(sid) / store.page_file(sid, 1).name, "PNG")
+
+    res = client.post(f"/api/sessions/{sid}/lines/reprocess").json()
+    assert res["pages_reprocessed"] == [1]
+    page = res["report"]["pages"][0]
+    assert page["fixed_px"] == 0
+    assert page["main_line_mm"] < 2.0  # back to the original stroke, upscaled to the page
+    with Image.open(store.page_file(sid, 1)) as img:
+        assert img.size == (2550, 3300)
+
+
+def test_reprocess_skips_pages_without_original() -> None:
+    sid = _book_with_page(_drawing(40, size=(2550, 3300)))
+    state = store.load_session(sid)
+    assert state is not None
+    state.pages[0].line_fixed_px = 4
+    store.save_session(state)
+    assert client.post(f"/api/sessions/{sid}/lines/reprocess").json()["pages_reprocessed"] == []
+    assert client.post(f"/api/sessions/{sid}/lines/reprocess?page=7").status_code == 404

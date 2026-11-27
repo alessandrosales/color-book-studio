@@ -237,14 +237,14 @@ def build_layout_text_directive(
     )
 
 
-def _stroke_words(mm: float) -> str:
-    if mm >= 2.5:
-        return "extra thick chunky marker"
-    if mm >= 1.5:
-        return "thick bold marker"
-    if mm >= 1.0:
-        return "medium-thick clean"
-    if mm >= 0.6:
+def _stroke_words(std: LineStandard) -> str:
+    """How the target stroke looks, judged by the middle of the standard's range."""
+    mid = (std.line_min_mm + std.line_max_mm) / 2
+    if mid >= 1.4:
+        return "bold clean"
+    if mid >= 0.9:
+        return "medium-weight clean felt-tip"
+    if mid >= 0.6:
         return "fine clean ink"
     return "fine technical pen"
 
@@ -252,11 +252,11 @@ def _stroke_words(mm: float) -> str:
 def line_standard_directive(std: LineStandard) -> str:
     """Spell out the line check's targets so the page is drawn within them the first time."""
     parts = [
-        f"Line weight standard ({std.label}): main outlines are {_stroke_words(std.line_min_mm)} lines, "
+        f"Line weight standard ({std.label}): main outlines are {_stroke_words(std)} lines, "
         f"{std.line_min_mm:g} to {std.line_max_mm:g} mm thick on the printed page, the same weight on "
         f"every outline of the page; never thinner hairlines and never heavier than {std.line_max_mm:g} mm."
     ]
-    if std.tiny_region_allowance <= 60:
+    if std.tiny_region_allowance <= 150:  # children's and simple styles
         parts.append(
             f"Colorable areas: every closed shape is at least {std.min_region_mm:g} mm across, big enough "
             f"to color with a crayon; at most about {std.tiny_region_allowance} small closed shapes on the "

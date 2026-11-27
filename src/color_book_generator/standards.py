@@ -262,14 +262,20 @@ class LineStandard:
     tiny_region_allowance: int
 
 
+# KDP's only hard rule is a 0.75 pt (0.3 mm) minimum line, so no standard goes below it.
+# Market practice for children's books is about 2-4 pt (0.7-1.4 mm) and 0.5-1.5 pt for
+# detailed adult pages. The 3-5 row was calibrated on clean storybook pages (about 1 mm
+# strokes, 20-90 areas under 5 mm); far thicker lines swallow eyes, beaks and lettering.
+KDP_MIN_LINE_MM = 0.3
+
 LINE_STANDARDS: dict[str, LineStandard] = {
-    "0-3": LineStandard("0-3", "0 a 3 anos", 2.5, 4.0, 15.0, 8),
-    "3-5": LineStandard("3-5", "3 a 5 anos", 1.5, 2.5, 8.0, 30),
-    "6-9": LineStandard("6-9", "6 a 9 anos", 1.0, 1.5, 5.0, 60),
-    "cozy": LineStandard("cozy", "Bold & Easy", 1.5, 2.5, 6.0, 30),
-    "kawaii": LineStandard("kawaii", "Kawaii", 1.0, 1.5, 5.0, 60),
-    "comics": LineStandard("comics", "Mangá e manhwa", 0.6, 1.0, 3.0, 400),
-    "intricate": LineStandard("intricate", "Adulto intricado", 0.5, 0.8, 2.0, 2000),
+    "0-3": LineStandard("0-3", "0 a 3 anos", 1.0, 2.0, 8.0, 30),
+    "3-5": LineStandard("3-5", "3 a 5 anos", 0.7, 1.4, 5.0, 90),
+    "6-9": LineStandard("6-9", "6 a 9 anos", 0.5, 1.0, 4.0, 150),
+    "cozy": LineStandard("cozy", "Bold & Easy", 0.8, 1.6, 5.0, 90),
+    "kawaii": LineStandard("kawaii", "Kawaii", 0.5, 1.0, 4.0, 150),
+    "comics": LineStandard("comics", "Mangá e manhwa", KDP_MIN_LINE_MM, 0.8, 2.0, 400),
+    "intricate": LineStandard("intricate", "Adulto intricado", KDP_MIN_LINE_MM, 0.6, 1.5, 2000),
 }
 
 CATEGORY_LINE_KEY: dict[str, str] = {

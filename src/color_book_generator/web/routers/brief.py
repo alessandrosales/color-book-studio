@@ -31,6 +31,7 @@ from color_book_generator.web.line_check import (
     LineReport,
     analyze_pages,
     build_line_report,
+    reprocess_page,
     thicken_page,
 )
 from color_book_generator.web.reading import ReadingReport, build_report
@@ -314,14 +315,39 @@ class ThickenResponse(BaseModel):
 @router.post("/lines/thicken", response_model=ThickenResponse)
 def thicken_lines(sid: str, page: int | None = None) -> ThickenResponse:
     """Thicken thin pages up to the standard (one page, or every fixable page)."""
-    state = _session(sid)
-    dpi = _session_book_cfg(state).dpi
-    analyze_pages(state, dpi, only_missing=True)
-    targets = [p for p in state.pages if p.status == "done" and (page is None or p.index == page)]
-    if page is not None and not targets:
-        raise HTTPException(status_code=404, detail="pagina nao encontrada ou ainda nao gerada")
-    fixed = [p.index for p in targets if thicken_page(state, p, dpi)]
-    if fixed:
-        state.pdf_ready = False
-    store.save_session(state)
+    # Held from load to save: two requests (a double click) must not both thicken a file.
+    with store.session_lock(sid):
+        state = _session(sid)
+        dpi = _session_book_cfg(state).dpi
+        targets = [p for p in state.pages if p.status == "done" and (page is None or p.index == page)]
+        if page is not None and not targets:
+            raise HTTPException(status_code=404, detail="pagina nao encontrada ou ainda nao gerada")
+        fixed = [p.index for p in targets if thicken_page(state, p, dpi)]
+        if fixed:
+            state.pdf_ready = False
+        store.save_session(state)
     return ThickenResponse(pages_fixed=fixed, report=build_line_report(state, dpi))
+
+
+class ReprocessResponse(BaseModel):
+    pages_reprocessed: list[int]
+    report: LineReport
+
+
+@router.post("/lines/reprocess", response_model=ReprocessResponse)
+def reprocess_lines(sid: str, page: int | None = None) -> ReprocessResponse:
+    """Rebuild pages from the model's original image (all thickened pages, or one page)."""
+    with store.session_lock(sid):
+        state = _session(sid)
+        cfg = _session_book_cfg(state)
+        if page is None:
+            targets = [p for p in state.pages if p.status == "done" and p.line_fixed_px > 0]
+        else:
+            targets = [p for p in state.pages if p.status == "done" and p.index == page]
+            if not targets:
+                raise HTTPException(status_code=404, detail="pagina nao encontrada ou ainda nao gerada")
+        done = [p.index for p in targets if reprocess_page(state, p, cfg)]
+        if done:
+            state.pdf_ready = False
+        store.save_session(state)
+    return ReprocessResponse(pages_reprocessed=done, report=build_line_report(state, cfg.dpi))
